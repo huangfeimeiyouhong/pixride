@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>像素骑行 · 大理→拉萨 | Day1 被野狗追</title>
+<!-- 全屏/主屏应用相关：加到主屏幕后以全屏模式启动（无地址栏/状态栏） -->
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="像素骑行" />
+<meta name="theme-color" content="#0b0d17" />
+<link rel="manifest" href="./manifest.json" />
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; background: #0b0d17;
+    overflow: hidden; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* 用 fixed 铺满视口，规避移动端地址栏收起/展开导致的尺寸跳动 */
+  body {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #game {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #000;
+    touch-action: none;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .hint {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    color: #8aa; font: 12px/1.4 monospace; text-align: center; pointer-events: none;
+    text-shadow: 0 1px 0 #000;
+    transition: opacity 0.4s;
+  }
+  .hint.fade { opacity: 0; }
+  .tip {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    max-width: 78vw; padding: 14px 18px; border-radius: 10px;
+    background: rgba(11, 13, 23, 0.92); border: 1px solid #2a3350;
+    color: #cfe3ff; font: 13px/1.7 -apple-system, "PingFang SC", monospace;
+    text-align: center; pointer-events: none; z-index: 10;
+    transition: opacity 0.5s;
+  }
+  .tip.fade { opacity: 0; }
+  /* 右上角常驻全屏按钮（不支持自动全屏的浏览器兜底） */
+  .fsbtn {
+    position: fixed;
+    right: calc(10px + env(safe-area-inset-right, 0px));
+    top: calc(10px + env(safe-area-inset-top, 0px));
+    width: 40px; height: 40px; line-height: 38px;
+    text-align: center; font-size: 17px; color: #cfe3ff;
+    background: rgba(11, 13, 23, 0.72); border: 1px solid #2a3350;
+    border-radius: 10px; z-index: 20; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hint">空格/↑/点击左屏 = 跳跃 &nbsp;·&nbsp; Shift/→/按住右屏 = 蹬车加速</div>
+<div class="tip" id="tip" style="display:none"></div>
+
+<!-- 与抖音小游戏共用同一套核心模块 -->
+<script src="../src/core/raf.js"></script>
+<script src="../src/core/config.js"></script>
+<script src="../src/core/gfx.js"></script>
+<script src="../src/core/sprites.js"></script>
+<script src="../src/core/input.js"></script>
+<script src="../src/core/audio.js"></script>
+<script src="../src/world/background.js"></script>
+<script src="../src/entities/player.js"></script>
+<script src="../src/entities/dog.js"></script>
+<script src="../src/entities/obstacle.js"></script>
+<script src="../src/entities/item.js"></script>
+<script src="../src/world/level.js"></script>
+<script src="../src/game/main.js"></script>
+<script>
+// 手机浏览器全屏策略：
+// 1) 从"添加到主屏幕"的图标启动（standalone/fullscreen 模式）→ 本身就是全屏，直接锁横屏；
+// 2) 普通浏览器标签页：浏览器禁止无手势自动全屏，因此在「首次触摸/点击」时请求全屏（用户手势内合法）；
+// 3) iOS Safari 不支持元素全屏 API → 引导用户「添加到主屏幕」。
+(function () {
+  var mq = window.matchMedia ? window.matchMedia.bind(window) : null;
+  var isStandalone = (mq && (mq('(display-mode: fullscreen)').matches || mq('(display-mode: standalone)').matches))
+    || window.navigator.standalone === true;
+
+  function lockLandscape() {
+    try {
+      if (screen.orientation && screen.orientation.lock) {
+        var p = screen.orientation.lock('landscape');
+        if (p && p.catch) p.catch(function () {});
+      } else if (screen.lockOrientation) {
+        screen.lockOrientation('landscape');
+      }
+    } catch (e) {}
+  }
+
+  function fsEl() {
+    return document.fullscreenElement || document.webkitFullscreenElement
+      || document.mozFullScreenElement || document.msFullscreenElement;
+  }
+
+  // 返回 Promise<boolean>：区分"成功"与"被浏览器拒绝"（被拒时同步无返回值为真，故统一用 Promise）
+  function enterFullscreen() {
+    var el = document.documentElement;
+    var fn = el.requestFullscreen || el.webkitRequestFullscreen
+      || el.webkitRequestFullScreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+    if (!fn) return Promise.resolve(false);
+    var p;
+    try {
+      p = fn.call(el, { navigationUI: 'hide' });
+    } catch (e) { return Promise.resolve(false); }
+    if (p && p.then) {
+      return p.then(function () { lockLandscape(); return true; },
+                    function () { return false; });
+    }
+    lockLandscape();
+    return Promise.resolve(true);
+  }
+
+  function showTip(html) {
+    var tip = document.getElementById('tip');
+    if (!tip) return;
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    setTimeout(function () { tip.classList.add('fade'); }, 4200);
+    setTimeout(function () { tip.style.display = 'none'; }, 5000);
+  }
+
+  // 常驻全屏按钮（右上角），兼容所有浏览器的手动入口
+  var btn = document.createElement('div');
+  btn.className = 'fsbtn';
+  btn.textContent = '⛶';
+  btn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    enterFullscreen();
+  });
+  document.body.appendChild(btn);
+
+  function syncBtn(show) {
+    btn.style.display = (show === true && !fsEl() && !isStandalone) ? 'block' : 'none';
+  }
+  syncBtn(false);
+
+  if (isStandalone) {
+    // 主屏应用模式：本身已全屏，只需锁横屏
+    lockLandscape();
+  } else {
+    var tries = 0, settled = false;
+    var removeGestureListeners = function () {
+      document.removeEventListener('pointerup', onGesture, true);
+      document.removeEventListener('touchend', onGesture, true);
+      document.removeEventListener('click', onGesture, true);
+    };
+    // 关键：必须用 pointerup / touchend / click —— touchstart / pointerdown 不算"用户激活"，
+    // 浏览器会直接拒绝全屏请求（这正是之前"点了也没全屏"的原因）。
+    var onGesture = function () {
+      if (settled || fsEl()) return;
+      enterFullscreen().then(function (ok) {
+        if (ok) {
+          settled = true;
+          removeGestureListeners();
+          syncBtn(false);
+          setTimeout(function () { window.dispatchEvent(new Event('resize')); }, 320);
+        } else if (++tries >= 2) {
+          showTip('当前浏览器不支持网页全屏。<br>请点右上角 ⛶ 按钮，<br>或用「分享 → 添加到主屏幕」后从图标启动。');
+          syncBtn(true);
+        }
+      });
+    };
+    document.addEventListener('pointerup', onGesture, true);
+    document.addEventListener('touchend', onGesture, true);
+    document.addEventListener('click', onGesture, true);
+
+    // 手动兜底按钮：1.5 秒后若仍未全屏就显示
+    setTimeout(function () { syncBtn(true); }, 1500);
+
+    ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(function (ev) {
+      document.addEventListener(ev, function () {
+        syncBtn(!fsEl());
+        setTimeout(function () { window.dispatchEvent(new Event('resize')); }, 120);
+      });
+    });
+  }
+})();
+</script>
+<script>
+(function () {
+  var PR = window.PR;
+  var cfg = PR.config;
+  var canvas = document.getElementById('game');
+
+  // 逻辑视口 + 像素比（限制最高 3x，避免超大画布拖慢性能）
+  function viewport() {
+    return {
+      viewW: window.innerWidth,
+      viewH: window.innerHeight,
+      dpr: Math.min(window.devicePixelRatio || 1, 3)
+    };
+  }
+  var v0 = viewport();
+
+  var buffer = document.createElement('canvas');
+  buffer.width = cfg.BUFFER_W;
+  buffer.height = cfg.BUFFER_H;
+
+  PR.input.init(canvas);
+  if (PR.audio && PR.audio.init) PR.audio.init();
+
+  // 物理分辨率与 ctx 缩放由 Game 按 DPR 管理
+  var game = new PR.Game({
+    canvas: canvas,
+    buffer: buffer,
+    viewW: v0.viewW,
+    viewH: v0.viewH,
+    dpr: v0.dpr
+  });
+  window.__pixelRide = game;
+  game.start();
+
+  window.addEventListener('resize', function () {
+    var v = viewport();
+    game.resize(v.viewW, v.viewH, v.dpr);
+  });
+  // 切到后台标签页自动暂停，回来恢复
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) game.pause(); else game.resume();
+  });
+
+  // 底部操作提示 6 秒后淡出，避免长期遮挡画面
+  setTimeout(function () {
+    var h = document.querySelector('.hint');
+    if (h) h.classList.add('fade');
+  }, 6000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "像素骑行 · 滇藏线",
+  "short_name": "像素骑行",
+  "description": "从大理骑行到拉萨的复古像素小游戏 · DAY 1 被野狗追",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone", "minimal-ui"],
+  "orientation": "landscape",
+  "background_color": "#0b0d17",
+  "theme_color": "#0b0d17",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
