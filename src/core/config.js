@@ -1,5 +1,5 @@
 // src/core/config.js
-// 全局调参常量：分辨率、物理、关卡、数值平衡集中在此，便于后续扩展多关卡。
+// 全部可调数值集中在这里。单位：世界坐标 1 = 1 像素（缓冲区分辨率下）。
 (function () {
   var g = typeof globalThis !== 'undefined' ? globalThis
     : (typeof window !== 'undefined' ? window
@@ -7,78 +7,52 @@
   var PR = g.PR || (g.PR = {});
 
   PR.config = {
-    // 低分辨率帧缓冲（放大后即复古像素感）
-    BUFFER_W: 360,
-    BUFFER_H: 180,
+    // ---- 视口 ----
+    TARGET_H: 330,          // 期望的缓冲区高度（实际按整数倍缩放适配屏幕）
+    MAX_BUFFER_W: 1100,
+    GROUND_H: 84,           // 基线以下的路面带高度
+    ROAD_FAR: 14,           // 路面远边缘在基线上方的距离（路面纵深）
+    PLAYER_X_FRAC: 0.27, PLAYER_X_MIN: 150, PLAYER_X_MAX: 250,
+    STEP: 1 / 120,          // 固定物理步长
 
-    GROUND_Y: 142,          // 地面基线（车轮底部）
-    PLAYER_SCREEN_X: 92,    // 骑行者固定屏幕 X
-
-    // 速度（虚拟像素 / 秒）
-    BASE_SPEED: 130,        // 自动巡航速度
-    PEDAL_SPEED: 250,       // 蹬车爆发速度
-    DOG_SPEED: 136,         // 野狗奔跑速度（略高于巡航，制造压迫感）
-    HIT_SPEED: 45,          // 撞障碍后短暂速度
-
-    // 物理（y 为离地高度，向上为正）
-    GRAVITY: 1500,          // px/s^2（向下加速度）
-    JUMP_VELOCITY: 560,     // 起跳初速度（向上为正）
-    MAX_FALL: 760,          // 最大下落速度（幅值）
-
-    // 体力
+    // ---- 骑行 ----
+    BASE_SPEED: 250,        // 滑行速度
+    PEDAL_SPEED: 430,       // 蹬车速度
+    HIT_SPEED: 95,          // 摔车后的速度
+    STOP_SPEED: 0,
+    ACCEL: 5.5,             // 速度趋近目标的系数
+    SLOPE_FACTOR: 1.3,      // 坡度对速度的影响
+    SLOPE_DRAIN: 1.6,       // 上坡额外耗力
     STAMINA_MAX: 100,
-    PEDAL_DRAIN: 52,        // 蹬车消耗 / 秒
-    PEDAL_REGEN: 26,        // 恢复 / 秒
-    PEDAL_MIN: 6,           // 体力低于此值无法蹬车
+    STAMINA_DRAIN: 40,      // 蹬车每秒消耗
+    STAMINA_REGEN: 24,      // 滑行每秒恢复
+    STAMINA_MIN: 8,
+    JUMP_V: 520, GRAVITY: 1700, JUMP_CUT: 0.5,
+    JUMP_BUFFER: 0.14,      // 落地前按跳的预输入窗口
+    HURT_TIME: 0.75, INVULN: 1.25, SLIP_TIME: 0.8,
 
-    // 关卡（Day 1 被野狗追）
-    LEVEL_LENGTH: 2800,     // 到今日营地的总里程（虚拟 px ≈ 米）
-    DOG_GAP_START: 185,     // 初始狗与骑行者距离
-    DOG_GAP_MIN: 10,        // 小于此距离即被追上
-    DOG_GAP_MAX: 460,
+    // ---- 追狗 ----
+    DOG_GAP_START: 300, DOG_GAP_MAX: 520, DOG_GAP_DIE: 10,
+    DOG_POUNCE_RANGE: 62,   // 距离小于此值可能触发扑咬
+    DOG_TELEGRAPH: 0.5,     // 蓄力（"!"提示）时长
+    DOG_POUNCE_TIME: 0.42,  // 扑出时长
+    DOG_POUNCE_DIST: 86,    // 扑出的相对距离
+    DOG_COOLDOWN: 2.4,      // 扑咬后的冷却
+    DODGE_CLEAR: 26,        // 腾空高度超过此值即完美闪避
 
-    // 障碍
-    OBSTACLE_MIN_GAP: 150,
-    OBSTACLE_MAX_GAP: 320,
-    ROCK_HALF_W: 7,
-    ROCK_H: 9,
-    HIT_STUN: 0.55,         // 撞击减速时长（秒）
+    // ---- 关卡 ----
+    DAY_LEN: [5200, 6200, 7000, 7800, 8600, 9000],
+    DOG_SPEED: [252, 262, 272, 280, 288, 296],
+    TUTORIAL_X: 1500,
+    FLAT_BEFORE: 320, FLAT_AFTER: 460,     // 营地前后平坦区
 
-    // 积分
-    SCORE_PER_METER: 1,
-    SCORE_COIN: 10,
-    SCORE_STAMINA: 5,
-    SCORE_STICK: 25,
-    SCORE_CLEAR_ROCK: 8,
-
-    // 道具（沿路可拾取）
-    ITEM_MIN_GAP: 120,
-    ITEM_MAX_GAP: 260,
-    COIN_CLUSTER_MIN: 3,
-    COIN_CLUSTER_MAX: 5,
-    PICKUP_RANGE_X: 19,     // 拾取 X 半径
-    PICKUP_RANGE_Y: 17,     // 拾取 Y 半径（离地高度差）
-    ITEM_GROUND_Y: 12,      // 贴地道具离地高度
-    ITEM_HIGH_Y: 46,        // 跳高金币离地高度（约跳跃顶点）
-    STAMINA_RESTORE: 45,
-    STICK_KNOCKBACK: 118,   // 打狗棒把狗打退的距离
-    STICK_STUN: 1.3,        // 狗被打眩晕时长（秒）
-
-    // 狗的进阶：随里程进化品种 + 提速 + 周期性猛扑
-    DOG_BREED_BLACK_AT: 900,    // 恶犬出现里程
-    DOG_BREED_WOLF_AT: 1700,    // 灰狼出现里程
-    DOG_SPEED_BLACK: 150,
-    DOG_SPEED_WOLF: 162,
-    DOG_SPEED_RAMP: 0.011,      // 每米额外提速
-    DOG_SPEED_CAP: 196,
-    DOG_LUNGE_INTERVAL_START: 9.0,
-    DOG_LUNGE_INTERVAL_MIN: 3.2,
-    DOG_LUNGE_DURATION: 0.7,
-    DOG_LUNGE_SPEED_MULT: 1.55,
-    DOG_STUN_SPEED_MULT: 0.35,
-
-    // 渲染
-    UPSCALE_MIN: 2,
-    COLORS: null            // 由 gfx 注入
+    // ---- 升级 ----
+    UPGRADES: [
+      { key: 'stamina', name: '肺活量', desc: '体力上限 +12%', max: 5 },
+      { key: 'regen', name: '恢复力', desc: '体力恢复 +12%', max: 5 },
+      { key: 'pedal', name: '大腿力量', desc: '蹬车速度 +4%', max: 5 },
+      { key: 'light', name: '轻量车架', desc: '跳跃 +6% 滑行 +2%', max: 5 }
+    ],
+    UPGRADE_COST: [60, 140, 280, 480, 760]
   };
 })();

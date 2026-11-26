@@ -1,172 +1,127 @@
 // src/core/input.js
-// 统一输入：触屏（左半屏=跳跃，右半屏按住=蹬车加速）+ 键盘。
-// 兼容浏览器与抖音小游戏：小游戏运行时 window/canvas 可能没有 addEventListener，
-// 此时回退到 tt.onTouchStart / canvas.ontouchstart 等 API。
+// 统一输入：触屏（左半屏点按 = 跳跃，右半屏按住 = 蹬车）+ 键盘。
+// 兼容浏览器与抖音小游戏：小游戏运行时 canvas 可能没有 addEventListener，此时回退到 tt.onTouchStart 等全局 API。
+// 指针位置统一由 mapper(clientX, clientY) 换算成"缓冲区坐标"，界面层按缓冲区坐标做按钮命中。
 (function () {
   var g = typeof globalThis !== 'undefined' ? globalThis
     : (typeof window !== 'undefined' ? window
     : (typeof global !== 'undefined' ? global : Function('return this')()));
   var PR = g.PR || (g.PR = {});
 
-  var state = {
-    _jumpQueued: false,
-    _anyQueued: false,
-    _anyQueuedAt: 0,
-    pedalHeld: false,
-    jumpHeld: false,
-    _jumpKeys: { ' ': 1, ArrowUp: 1, w: 1, W: 1 },
-    _pedalKeys: { Shift: 1, ArrowRight: 1, d: 1, D: 1 }
+  var JUMP_KEYS = { ' ': 1, Spacebar: 1, ArrowUp: 1, w: 1, W: 1 };
+  var SPRINT_KEYS = { Shift: 1, ArrowRight: 1, d: 1, D: 1 };
+  var lastPressAt = 0, lastPressId = null;
+
+  var S = PR.input = {
+    mapper: null,                    // function(clientX, clientY) → { x, y }
+    sprintZone: null,                // function(x, y) → 是否属于"蹬车"区域
+    jumpQ: 0,                        // 待处理的跳跃（键盘或程序触发，带位置的手势不入队）
+    keyTaps: [],                     // 键盘产生的"确认"（Enter / 空格），供界面使用
+    taps: [],                        // 本帧的按下事件（缓冲区坐标）
+    active: {},                      // 仍在按下的指针：id → { x, y, ui }
+    keySprint: false, keyJump: false,
+    anyAt: 0,                        // 最近一次按下的时间戳（Date.now）
+    seq: 0                           // 每次按下 +1，用于"进入某状态后才有新输入"的判断
   };
 
-  // 首次输入时解锁音频（浏览器/小游戏自动播放策略）
-  function tryUnlockAudio() {
-    try { if (PR.audio && PR.audio.unlock) PR.audio.unlock(); } catch (e) {}
+  function unlock() { try { if (PR.audio && PR.audio.unlock) PR.audio.unlock(); } catch (e) {} }
+
+  function pointOf(t) {
+    var cx = (t.clientX != null) ? t.clientX : (t.pageX != null ? t.pageX : (t.x != null ? t.x : 0));
+    var cy = (t.clientY != null) ? t.clientY : (t.pageY != null ? t.pageY : (t.y != null ? t.y : 0));
+    return S.mapper ? S.mapper(cx, cy) : { x: cx, y: cy };
   }
 
-  var lastAnyAt = 0;  // 去重：模拟器可能对一次物理按下派发多个事件
-  function queueJump() { state._jumpQueued = true; queueAny(); }
-  function queueAny() {
+  function press(x, y, id) {
     var now = Date.now();
-    if (now - lastAnyAt < 100) return;   // 100ms 内的重复按下视为同一次
-    lastAnyAt = now;
-    state._anyQueued = true;
-    state._anyQueuedAt = now;
+    if (now - lastPressAt < 35 && lastPressId === id) return;       // 模拟器对同一次按下重复派发
+    lastPressAt = now; lastPressId = id;
+    unlock();
+    S.anyAt = now; S.seq++;
+    S.active[id] = { x: x, y: y, ui: false };
+    S.taps.push({ x: x, y: y, id: id, used: false });
   }
+  function release(id) { delete S.active[id]; }
 
-  function zoneFromX(x, width) {
-    return x < width * 0.45 ? 'jump' : 'pedal';
-  }
-
-  function getCanvasWidth(canvas) {
-    return (canvas && canvas.width) ? canvas.width : 360;
-  }
-
-  // 安全绑定：优先 addEventListener，返回是否成功
-  function on(target, type, handler, opts) {
-    if (target && typeof target.addEventListener === 'function') {
-      target.addEventListener(type, handler, opts);
-      return true;
+  function isSprint() {
+    if (S.keySprint) return true;
+    if (!S.sprintZone) return false;
+    for (var k in S.active) {
+      var p = S.active[k];
+      if (!p.ui && S.sprintZone(p.x, p.y)) return true;
     }
     return false;
   }
 
-  PR.input = {
-    init: function (canvas) {
-      if (!canvas) return;
-
-      // ---- 键盘（仅浏览器等有 window.addEventListener 的环境）----
-      var kd = function (e) {
-        if (state._jumpKeys[e.key]) { queueJump(); state.jumpHeld = true; tryUnlockAudio(); e.preventDefault && e.preventDefault(); }
-        if (state._pedalKeys[e.key]) { state.pedalHeld = true; tryUnlockAudio(); e.preventDefault && e.preventDefault(); }
-        if (e.key === 'Enter') { queueAny(); tryUnlockAudio(); }
-      };
-      var ku = function (e) {
-        if (state._jumpKeys[e.key]) state.jumpHeld = false;
-        if (state._pedalKeys[e.key]) state.pedalHeld = false;
-      };
-      if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-        window.addEventListener('keydown', kd);
-        window.addEventListener('keyup', ku);
+  function bindTouch(canvas) {
+    var on = function (target, type, handler, opts) {
+      if (target && typeof target.addEventListener === 'function') { target.addEventListener(type, handler, opts); return true; }
+      if (target && target['on' + type] !== undefined) { target['on' + type] = handler; return true; }
+      return false;
+    };
+    var got = false, list;
+    var down = function (e) {
+      list = (e.changedTouches && e.changedTouches.length) ? e.changedTouches : [e];
+      for (var i = 0; i < list.length; i++) {
+        var t = list[i], p = pointOf(t);
+        press(p.x, p.y, t.identifier != null ? t.identifier : 'mouse');
       }
-
-      // ---- 触屏 / 鼠标 ----
-      var activePointers = {}; // id -> zone
-      var touchFiredAt = 0, touchEndedAt = 0;
-
-      var touchesOf = function (e) {
-        if (!e) return [];
-        if (e.changedTouches && e.changedTouches.length) return e.changedTouches;
-        if (e.touches && e.touches.length) return e.touches;
-        return [e];
-      };
-
-      var onDown = function (e, isTouch) {
-        var now = Date.now();
-        if (isTouch) { touchFiredAt = now; }
-        else if (now - touchFiredAt < 500) { return; } // 忽略触屏后合成的鼠标事件
-        tryUnlockAudio();
-        queueAny();
-        var w = getCanvasWidth(canvas);
-        var changed = touchesOf(e);
-        var rect = null;
-        try { rect = (canvas.getBoundingClientRect) ? canvas.getBoundingClientRect() : null; } catch (err) { rect = null; }
-        for (var i = 0; i < changed.length; i++) {
-          var t = changed[i];
-          var cx = (t.clientX != null) ? t.clientX : (t.pageX != null ? t.pageX : 0);
-          if (rect) cx = cx - (rect.left || 0);
-          var zone = zoneFromX(cx, rect ? (rect.width || w) : w);
-          var id = (t.identifier != null) ? t.identifier : 'mouse';
-          activePointers[id] = zone;
-          if (zone === 'jump') { queueJump(); state.jumpHeld = true; }
-          else state.pedalHeld = true;
-        }
-        e.preventDefault && e.preventDefault();
-      };
-      var onUp = function (e, isTouch) {
-        var now = Date.now();
-        if (isTouch) { touchEndedAt = now; }
-        else if (now - touchEndedAt < 500) { return; }
-        var changed = touchesOf(e);
-        var stillPedal = false, stillJump = false;
-        for (var i = 0; i < changed.length; i++) {
-          var t = changed[i];
-          var id = (t.identifier != null) ? t.identifier : 'mouse';
-          delete activePointers[id];
-        }
-        for (var k in activePointers) {
-          if (activePointers[k] === 'pedal') stillPedal = true;
-          if (activePointers[k] === 'jump') stillJump = true;
-        }
-        state.pedalHeld = stillPedal;
-        state.jumpHeld = stillJump;
-      };
-
-      // 优先用 canvas.addEventListener（现代小游戏 / 浏览器）
-      // 触屏与鼠标事件区分：模拟器可能对一次点击同时派发 touchstart 和 mousedown，
-      // 用 isTouch + touchFiredAt 去重，避免输入被置位两次。
-      var onDownTouch = function (e) { onDown(e, true); };
-      var onDownMouse = function (e) { onDown(e, false); };
-      var onUpTouch = function (e) { onUp(e, true); };
-      var onUpMouse = function (e) { onUp(e, false); };
-      var gotTouch = on(canvas, 'touchstart', onDownTouch, { passive: false });
-      on(canvas, 'touchend', onUpTouch);
-      on(canvas, 'touchcancel', onUpTouch);
-      on(canvas, 'mousedown', onDownMouse);
-      if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-        window.addEventListener('mouseup', onUpMouse);
-      } else {
-        on(canvas, 'mouseup', onUpMouse);
-      }
-
-      // 回退：抖音小游戏全局触摸 API
-      if (!gotTouch && typeof tt !== 'undefined') {
-        if (typeof tt.onTouchStart === 'function') tt.onTouchStart(onDown);
-        if (typeof tt.onTouchEnd === 'function') tt.onTouchEnd(onUp);
-        if (typeof tt.onTouchCancel === 'function') tt.onTouchCancel(onUp);
-      } else if (!gotTouch) {
-        // 最后回退：ontouchstart 属性赋值
-        if (canvas.ontouchstart !== undefined) canvas.ontouchstart = onDown;
-        if (canvas.ontouchend !== undefined) canvas.ontouchend = onUp;
-      }
-    },
-
-    consumeJump: function () {
-      var v = state._jumpQueued;
-      state._jumpQueued = false;
-      return v;
-    },
-    consumeAny: function (since) {
-      var v = state._anyQueued;
-      state._anyQueued = false;
-      if (!v) return false;
-      // 只接受进入当前状态之后的新按下，避免游戏内的点击残留触发结算画面秒退
-      if (since != null && state._anyQueuedAt < since) return false;
-      return true;
-    },
-    isPedalHeld: function () { return !!state.pedalHeld; },
-    isJumpHeld: function () { return !!state.jumpHeld; },
-    reset: function () {
-      state._jumpQueued = false; state._anyQueued = false; state.pedalHeld = false; state.jumpHeld = false;
+      if (e && e.preventDefault) e.preventDefault();
+    };
+    var up = function (e) {
+      list = (e.changedTouches && e.changedTouches.length) ? e.changedTouches : [e];
+      for (var i = 0; i < list.length; i++) release(list[i].identifier != null ? list[i].identifier : 'mouse');
+      if (e && e.preventDefault) e.preventDefault();
+    };
+    if (typeof window !== 'undefined') {
+      got = on(canvas, 'touchstart', down, { passive: false });
+      on(canvas, 'touchend', up); on(canvas, 'touchcancel', up);
+      if (!got) { on(canvas, 'mousedown', down); on(window, 'mouseup', up); }
+    } else {
+      got = on(canvas, 'touchstart', down);
+      on(canvas, 'touchend', up); on(canvas, 'touchcancel', up);
+      if (!got) { on(canvas, 'mousedown', down); on(canvas, 'mouseup', up); }
     }
+    // 回退：抖音小游戏全局触摸 API
+    if (!got && typeof tt !== 'undefined') {
+      if (typeof tt.onTouchStart === 'function') tt.onTouchStart(function (res) { down({ changedTouches: res.touches || res.changedTouches || [] }); });
+      if (typeof tt.onTouchEnd === 'function') tt.onTouchEnd(function (res) { up({ changedTouches: res.changedTouches || [] }); });
+      if (typeof tt.onTouchCancel === 'function') tt.onTouchCancel(function (res) { up({ changedTouches: res.changedTouches || [] }); });
+    }
+  }
+
+  function bindKeys() {
+    var kd = function (e) {
+      var k = e.key || e.keyCode;
+      if (JUMP_KEYS[k]) { S.jumpQ++; S.keyJump = true; S.keyTaps.push('enter'); unlock(); if (e.preventDefault) e.preventDefault(); }
+      else if (SPRINT_KEYS[k]) { S.keySprint = true; unlock(); if (e.preventDefault) e.preventDefault(); }
+      else if (k === 'Enter') { S.keyTaps.push('enter'); S.anyAt = Date.now(); S.seq++; if (e.preventDefault) e.preventDefault(); }
+      else if (k === 'Escape' || k === 'p' || k === 'P') { S.keyTaps.push('pause'); }
+      else if (k === 'm' || k === 'M') { S.keyTaps.push('mute'); }
+    };
+    var ku = function (e) {
+      var k = e.key || e.keyCode;
+      if (JUMP_KEYS[k]) S.keyJump = false;
+      else if (SPRINT_KEYS[k]) S.keySprint = false;
+    };
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('keydown', kd); window.addEventListener('keyup', ku);
+    } else if (typeof tt !== 'undefined' && typeof tt.onKeyDown === 'function') {
+      tt.onKeyDown(kd); tt.onKeyUp(ku);
+    }
+  }
+
+  S.init = function (canvas) {
+    S.taps.length = 0; S.keyTaps.length = 0; S.active = {}; S.jumpQ = 0; S.keySprint = false; S.keyJump = false;
+    if (canvas) bindTouch(canvas);
+    bindKeys();
   };
+  S.consumeJump = function () { var v = S.jumpQ > 0; S.jumpQ = 0; return v; };
+  S.isSprintHeld = isSprint;
+  S.isJumpHeld = function () { for (var k in S.active) if (!S.active[k].ui && S.sprintZone && !S.sprintZone(S.active[k].x, S.active[k].y)) return true; return S.keyJump; };
+  S.takeKeyTaps = function () { var v = S.keyTaps; S.keyTaps = []; return v; };
+  // 标记某次按下已被界面消耗：它不再参与蹬车 / 跳跃
+  S.consumeTap = function (tap) { tap.used = true; if (S.active[tap.id]) S.active[tap.id].ui = true; };
+  S.endFrame = function () { S.taps.length = 0; };
+  S.reset = function () { S.taps.length = 0; S.keyTaps.length = 0; S.jumpQ = 0; S.keySprint = false; S.keyJump = false; S.active = {}; };
 })();
