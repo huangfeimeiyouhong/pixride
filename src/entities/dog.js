@@ -34,8 +34,8 @@
     switch (this.state) {
       case 'chase':
         v = g.dogSpeed() + (gap < 110 && g.day < 2 ? -8 : 0);
-        if (p.hurtT > 0) v += 46;
-        if (p.exhaust > 0) v += 14;
+        if (p.hurtT > 0) v += 18;                            // 闻到血腥味，但别让摔车直接变成死局
+        if (p.exhaust > 0) v += 8;
         this.x += v * dt;
         this.phase += dt * (5 + v / 30);
         this.barkT -= dt;
@@ -68,7 +68,7 @@
         if (u >= 1) { this.start('recover'); this.z = 0; g.particles.dust(this.x + 40, this.groundY(), 5, 1); }
         break;
       case 'recover':
-        this.x += (p.v - (this.fed ? 40 : 56)) * dt;         // 扑空后喘口气；刚咬到一口则贴得更近
+        this.x += (p.v - (this.fed ? 110 : 80)) * dt;        // 咬完/扑空后都要退回去喘口气，给骑手甩开的窗口
         this.phase += dt * 5;
         if (this.t > cfg.DOG_COOLDOWN) { this.start('chase'); this.fed = false; this.cool = 0.6 + this.idx * 0.9; }
         break;
@@ -92,8 +92,13 @@
       default:
         this.start('chase');                                                  // 未知状态（如标题画面）一律回到追赶
     }
-    // 追得太近：直接咬到后轮
-    if (this.state === 'chase' && live && p.x - this.x < cfg.DOG_GAP_DIE + 4) { if (g.onBite) g.onBite(this); }
+    // 贴身威胁：任何追击状态下贴着后轮累计太久 = 被追上（扑咬循环不清零，拉开距离才缓解）
+    if (live && this.state !== 'giveup' && this.state !== 'fetch' && this.state !== 'sit' && this.state !== 'stretch') {
+      if (gap < cfg.DOG_GAP_DIE + 4) this.closeT = (this.closeT || 0) + dt;
+      else this.closeT = Math.max(0, (this.closeT || 0) - dt * 1.5);
+      if (gap > 300) this.closeT = 0;
+      if (this.closeT > cfg.DOG_KILL_GRACE) { this.closeT = 0; if (g.onBite) g.onBite(this); }
+    } else this.closeT = 0;
     var gmax = cfg.DOG_GAP_MAX + this.idx * 64;                            // 第二条狗最多落后更远，队形错开
     if (this.state !== 'giveup' && p.x - this.x > gmax) this.x = p.x - gmax;
   };

@@ -243,8 +243,8 @@
 
   // 野狗相关数值：随天数 / 无尽距离提高
   PR.Game.prototype.dogSpeed = function (dog) {
-    var p = this.player, base = this.mode === 'endless' ? 252 + Math.min(70, p.x / 300) : cfg.DOG_SPEED[Math.min(5, this.day)];
-    if (dog && dog.idx > 0) base -= 12;                                      // 第二条狗稍慢，错开队形
+    var p = this.player, base = this.mode === 'endless' ? 244 + Math.min(110, p.x / 280) : cfg.DOG_SPEED[Math.min(5, this.day)];
+    if (dog && dog.idx > 0) base -= 16;                                      // 第二条狗稍慢，错开队形
     if (this.surgeT > 0 && (!dog || dog.idx === 0)) base += cfg.DOG_SURGE;
     return base;
   };
@@ -321,6 +321,7 @@
     var p = this.player, fx = this.fx, gy = p.groundY(), lost = Math.min(this.coins, cfg.DOG_BITE_COINS);
     dog.fed = true;
     p.v = 70; p.hurtT = 0.85; p.z = 0; p.vz = 0; p.onGround = true; p.slipT = 0; p.boostT = 0;
+    p.stam = Math.max(0, p.stam - 15);                     // 被咬很消耗：连续失误会力竭，才真正致命
     p.combo = 0; p.comboT = 0; p.stats.bites++;
     this.coins -= lost;
     fx.shake(0.7); fx.stop(0.09); fx.flash(0.3, '#ff6a5e');

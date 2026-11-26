@@ -33,18 +33,19 @@
 
     // ---- 追狗 ----
     // 狗在身后 150~180 以内会蓄力扑咬：看到"!"后起跳即可闪避；蓄力 + 扑出 = 0.56s 后咬到，所以 0.5s 内起跳都来得及。
-    DOG_GAP_START: 300, DOG_GAP_MAX: 420, DOG_GAP_DIE: 78,   // 追到 78 以内 = 咬到后轮
+    DOG_GAP_START: 300, DOG_GAP_MAX: 420, DOG_GAP_DIE: 64,   // 追到 64 以内开始咬后轮，持续 DOG_KILL_GRACE 秒没拉开 = 骑行结束
     DOG_POUNCE_RANGE: 150,  // 距离小于此值且冷却完毕时扑咬
     DOG_TELEGRAPH: 0.3,     // 蓄力（"!"提示）时长
     DOG_POUNCE_TIME: 0.26,  // 扑出时长
     DOG_COOLDOWN: 2.4,      // 扑咬后的冷却
-    DOG_SURGE: 75, DOG_SURGE_TIME: 1.1,   // 野狗间歇性冲刺的加速量与时长
+    DOG_SURGE: 55, DOG_SURGE_TIME: 0.9,   // 野狗间歇性冲刺的加速量与时长
     DOG_BITE_COINS: 6,      // 被扑中掉落的金币
-    DODGE_CLEAR: 26,        // 腾空高度超过此值即完美闪避
+    DODGE_CLEAR: 26,
+    DOG_KILL_GRACE: 0.8,      // 累计贴身后轮 0.8s = 被追上；拉开距离会缓解        // 腾空高度超过此值即完美闪避
 
     // ---- 关卡 ----
     DAY_LEN: [9000, 11000, 13000, 15000, 17000, 19000],       // 每天路程（10 单位 = 1 米）
-    DOG_SPEED: [262, 272, 282, 290, 298, 306],                // 比滑行略快：不蹬车就会被慢慢追上
+    DOG_SPEED: [244, 254, 264, 274, 284, 282],                // 前两天比滑行(250)慢：不用蹬车也能甩开；后期略快，必须管理体力
     TUTORIAL_X: 1500,
     FLAT_BEFORE: 320, FLAT_AFTER: 460,     // 营地前后平坦区
 

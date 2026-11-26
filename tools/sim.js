@@ -208,7 +208,7 @@ reports.forEach(function (line) {
       (x.won ? '' : ' | 最后死于 ' + x.lastDist + 'm / ' + x.lastTotal + 'm') + ' | 升级 ' + x.up);
     var ks = Object.keys(x.deaths); if (ks.length) console.log('      死因: ' + ks.map(function (c) { return c + '×' + x.deaths[c]; }).join('，'));
   });
-  var e = line.endless, dist = e.map(function (r) { return r.result ? r.result.dist : 0; }), ec = {};
+  var e = line.endless, dist = e.map(function (r) { return (r.result ? r.result.dist : (r.stats ? Math.round(r.stats.dist / 10) : 0)) + 'm'; }), ec = {};
   e.forEach(function (r) { ec[r.cause || (r.result && r.result.win ? '结束' : '超时')] = (ec[r.cause || '超时'] || 0) + 1; });
-  console.log('  无尽: 距离 ' + dist.join('/') + 'm | 用时 ' + e.map(function (r) { return Math.round(r.t); }).join('/') + 's | 得分 ' + e.map(function (r) { return r.result ? r.result.score : 0; }).join('/') + ' | 死因 ' + JSON.stringify(ec));
+  console.log('  无尽: 距离 ' + dist.join(' / ') + ' | 用时 ' + e.map(function (r) { return Math.round(r.t); }).join('/') + 's | 得分 ' + e.map(function (r) { return r.result ? r.result.score : 0; }).join('/') + ' | 死因 ' + JSON.stringify(ec));
 });
