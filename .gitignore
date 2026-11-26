@@ -1,0 +1,21 @@
+# OS / editor junk
+Thumbs.db
+.DS_Store
+*.log
+.vscode/
+.idea/
+*.swp
+*~
+
+# Node / build artifacts
+node_modules/
+dist/
+build/
+out/
+
+# Python dev server caches
+__pycache__/
+*.pyc
+
+# Trae workspace metadata
+.trae/
