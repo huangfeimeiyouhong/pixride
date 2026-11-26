@@ -113,10 +113,10 @@
     ctx.fillStyle = st[3]; ctx.fillRect(x + 5, yy + 2, w - 10, 2);
     ctx.strokeStyle = st[1]; ctx.lineWidth = 2; rr(ctx, x + 1, yy + 1, w - 2, h - 2 - (pr ? 2 : 0), 7); ctx.stroke();
     if (o.icon) draw(ctx, o.icon, x + 16, yy + h / 2 + 7, 1);
-    if (o.cn) H.cn(ctx, o.cn, x + w / 2, yy + (o.sub ? h / 2 - 8 : h / 2) + 1, o.size || 15, st[2] === '#2a1a00' ? '#2a1a00' : 'white', 'center', 1);
+    if (o.cn) H.cn(ctx, o.cn, x + w / 2, yy + (o.sub ? h / 2 - 8 : h / 2) + 1, o.size || 15, 'white', 'center', 1);
     if (o.sub) {
-      if (/[^\x20-\x7e]/.test(o.sub)) H.cn(ctx, o.sub, x + w / 2, yy + h - 12, 11, st[2] === '#2a1a00' ? '#4a3000' : '#e6eefb', 'center', 1, 'bold', st[2] === '#2a1a00' ? false : undefined);
-      else H.text(ctx, o.sub, x + w / 2, yy + h - 14, { kind: st[2] === '#2a1a00' ? 'ink' : 'dim', size: 1, align: 'center' });
+      if (/[^\x20-\x7e]/.test(o.sub)) H.cn(ctx, o.sub, x + w / 2, yy + h - 12, 11, '#f4f8ff', 'center', 1);
+      else H.text(ctx, o.sub, x + w / 2, yy + h - 14, { kind: 'dim', size: 1, align: 'center' });
     }
     ctx.globalAlpha = a;
     H.rects[id] = { x: x, y: y, w: w, h: h };
