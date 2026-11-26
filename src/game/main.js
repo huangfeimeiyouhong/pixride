@@ -65,7 +65,7 @@
     this.cssW = vw; this.cssH = vh;
     var cw = Math.max(1, Math.round(vw * dpr)), ch = Math.max(1, Math.round(vh * dpr));    // 画布物理像素
     this.ox = 0; this.oy = 0; this.vw = cw; this.vh = ch;
-    if (cw < ch) { this.vh = Math.round(cw * 9 / 16); this.oy = Math.round((ch - this.vh) / 2); }
+    if (cw < ch) { this.vh = Math.min(ch, Math.round(cw * 1.6)); this.oy = Math.round((ch - this.vh) / 2); }  // 竖屏：保全宽，高屏补天空，极端比例才留黑
     var s = Math.max(1, Math.floor(this.vh / cfg.TARGET_H)), bw, bh;
     for (;;) { bw = Math.ceil(this.vw / s); bh = Math.ceil(this.vh / s); if (bw <= cfg.MAX_BUFFER_W || s >= 16) break; s++; }
     this.s = s; this.bw = bw; this.bh = bh; this.G = bh - cfg.GROUND_H;

@@ -55,19 +55,24 @@
     H.panel(ctx, px, py, pw, ph);
     H.cn(ctx, '第' + (g.day + 1) + '天 · 抵达营地', cx, py + 22, 18, 'title', 'center');
     H.stars(ctx, cx, py + 40, r.stars, 22, t);
-    H.text(ctx, 'SCORE ' + r.score + '   +' + r.coins + ' COINS   STUMBLES ' + r.stumbles, cx, py + 62, { kind: 'dim', size: 1, align: 'center' });
+    H.cn(ctx, '得分 ' + r.score + ' · 金币 +' + r.coins + ' · 摔车 ' + r.stumbles, cx, py + 62, 12, 'sub', 'center');
     var rh = ph < 300 ? 33 : 38, sy = py + 76;
     for (i = 0; i < 4; i++) {
       var y = sy + i * rh, k = SHOP[i], lv = d.up[k[0]], maxed = lv >= 5, cost = maxed ? 0 : PR.config.UPGRADE_COST[lv], ok = !maxed && d.coins >= cost;
       if (i & 1) { ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.fillRect(px + 10, y, pw - 120, rh - 2); }
       H.cn(ctx, k[1], px + 18, y + 11, 13, 'white', 'left');
       H.cn(ctx, k[2], px + 18, y + 24, 10, 'sub', 'left');
-      for (j = 0; j < 5; j++) { ctx.fillStyle = j < lv ? '#ffd23f' : '#2f3a56'; ctx.fillRect(px + 150 + j * 12, y + rh / 2 - 3, 8, 6); }
+      for (j = 0; j < 5; j++) {
+        ctx.fillStyle = j < lv ? '#ffd23f' : '#4d5b82';
+        ctx.fillRect(px + 150 + j * 12, y + rh / 2 - 3, 8, 6);
+        if (j < lv) { ctx.fillStyle = '#fff3c4'; ctx.fillRect(px + 150 + j * 12, y + rh / 2 - 3, 8, 2); }
+      }
       H.button(ctx, 'up' + i, px + pw - 108, y + (rh - 26) / 2, 98, 26, { kind: ok ? 'primary' : 'normal', cn: maxed ? '已满级' : cost + ' 金币', size: 11, alpha: maxed ? 0.5 : (ok ? 1 : 0.75) });
     }
     var fy = py + ph - 50;
-    draw(ctx, pr.coin[(t * 10 | 0) % 6], px + 24, fy + 20, 1);
-    H.text(ctx, '' + d.coins, px + 36, fy + 12, { kind: 'gold', size: 2 });
+    draw(ctx, pr.coin[(t * 10 | 0) % 6], px + 24, fy + 20, 1.4);
+    H.text(ctx, '' + d.coins, px + 40, fy + 10, { kind: 'gold', size: 3 });
+    H.cn(ctx, '金币', px + 40 + ('' + d.coins).length * 13 + 8, fy + 22, 11, 'sub', 'left');
     var nd = Math.min(5, g.day + 1);
     H.button(ctx, 'next', px + pw - 196, fy, 180, 42, { kind: 'primary', cn: '继续出发', size: 16, sub: 'DAY ' + (nd + 1) + ' · ' + PR.themes[nd].place });
   };
