@@ -122,6 +122,18 @@
   S.takeKeyTaps = function () { var v = S.keyTaps; S.keyTaps = []; return v; };
   // 标记某次按下已被界面消耗：它不再参与蹬车 / 跳跃
   S.consumeTap = function (tap) { tap.used = true; if (S.active[tap.id]) S.active[tap.id].ui = true; };
-  S.endFrame = function () { S.taps.length = 0; };
+  // 某次按下是否落在当前已登记的界面按钮上（rects 由 hud 在绘制时登记）
+  S.isUi = function (tap) {
+    var R = PR.hud && PR.hud.rects, k, r;
+    if (!R || !tap) return false;
+    for (k in R) {
+      r = R[k];
+      if (tap.x >= r.x && tap.x <= r.x + r.w && tap.y >= r.y && tap.y <= r.y + r.h) return true;
+    }
+    return false;
+  };
+  // 帧末兜底：仍按在按钮上的指针标记为界面操作（不会触发蹬车 / 跳跃）
+  S.markUi = function (tap) { if (tap && !tap.used && S.isUi(tap)) S.consumeTap(tap); };
+  S.endFrame = function () { for (var i = 0; i < S.taps.length; i++) S.markUi(S.taps[i]); S.taps.length = 0; };
   S.reset = function () { S.taps.length = 0; S.keyTaps.length = 0; S.jumpQ = 0; S.keySprint = false; S.keyJump = false; S.active = {}; };
 })();

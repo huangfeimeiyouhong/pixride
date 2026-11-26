@@ -28,9 +28,12 @@
     this.t += dt;
     if (this.hopT > 0) this.hopT -= dt;
     var gap = p.x - this.x, v, u;
+    // 骑手已停下的结局场面（被追上 / 到站）：停下，甩甩身子坐下
+    if (!live && !p.dead && this.state !== 'fetch' && this.state !== 'sit' && this.state !== 'stretch') this.start('giveup');
+    if (p.dead && this.state !== 'giveup') this.start('giveup');
     switch (this.state) {
       case 'chase':
-        v = g.dogSpeed() + (gap > 430 ? -34 : 0) + (gap < 110 && g.day < 2 ? -8 : 0);
+        v = g.dogSpeed() + (gap < 110 && g.day < 2 ? -8 : 0);
         if (p.hurtT > 0) v += 46;
         if (p.exhaust > 0) v += 14;
         this.x += v * dt;
@@ -45,14 +48,19 @@
         break;
       case 'crouch':
         this.x += (p.v - 6) * dt;                           // 保持距离
-        if (this.t >= g.telegraphTime()) { this.start('pounce'); this.z = 0; this.hitDone = false; g.sfx('pounce'); }
+        if (this.t >= g.telegraphTime()) {
+          this.start('pounce'); this.z = 0; this.hitDone = false;
+          // 无论从多远起扑，都在固定的时刻咬到 → 闪避时机只取决于看到"!"后多久起跳
+          this.lungeV = Math.max(0, p.x - this.x - 14) / cfg.DOG_POUNCE_TIME;
+          g.sfx('pounce');
+        }
         break;
       case 'pounce':
         u = this.t / cfg.DOG_POUNCE_TIME;
-        this.x += (p.v + g.pounceDist() / cfg.DOG_POUNCE_TIME) * dt;
+        this.x += (p.v + this.lungeV) * dt;
         if (p.x - this.x < 14) this.x = p.x - 14;           // 不穿过玩家
         this.z = Math.sin(clamp(u, 0, 1) * Math.PI) * 34;
-        if (!this.hitDone && p.x - this.x < 22) {
+        if (!this.hitDone && (p.x - this.x < 22 || u >= 1)) {
           this.hitDone = true;
           if (p.z > cfg.DODGE_CLEAR && p.onGround === false) { if (g.onDodge) g.onDodge(this); }
           else if (live) { if (g.onBite) g.onBite(this); }
@@ -60,9 +68,9 @@
         if (u >= 1) { this.start('recover'); this.z = 0; g.particles.dust(this.x + 40, this.groundY(), 5, 1); }
         break;
       case 'recover':
-        this.x += (p.v - 56) * dt;                          // 扑空后喘口气
+        this.x += (p.v - (this.fed ? 40 : 56)) * dt;         // 扑空后喘口气；刚咬到一口则贴得更近
         this.phase += dt * 5;
-        if (this.t > cfg.DOG_COOLDOWN) { this.start('chase'); this.cool = 0.6; }
+        if (this.t > cfg.DOG_COOLDOWN) { this.start('chase'); this.fed = false; this.cool = 0.6 + this.idx * 0.9; }
         break;
       case 'fetch':
         var dv = this.stickX - this.x;
@@ -81,10 +89,13 @@
       case 'giveup':
         this.phase += dt * 3;
         break;
+      default:
+        this.start('chase');                                                  // 未知状态（如标题画面）一律回到追赶
     }
     // 追得太近：直接咬到后轮
     if (this.state === 'chase' && live && p.x - this.x < cfg.DOG_GAP_DIE + 4) { if (g.onBite) g.onBite(this); }
-    if (p.x - this.x > cfg.DOG_GAP_MAX) this.x = p.x - cfg.DOG_GAP_MAX;
+    var gmax = cfg.DOG_GAP_MAX + this.idx * 64;                            // 第二条狗最多落后更远，队形错开
+    if (this.state !== 'giveup' && p.x - this.x > gmax) this.x = p.x - gmax;
   };
 
   D.throwStick = function (landX) { this.start('fetch'); this.stickX = landX; };
@@ -96,23 +107,21 @@
     switch (this.state) {
       case 'crouch': sp = set.crouch; break;
       case 'pounce': sp = set.pounce; break;
+      case 'giveup': sp = this.t < 0.7 ? set.stun : set.sit; break;
       case 'sit': sp = set.sit; break;
       case 'stretch': case 'stumble': sp = set.stun; break;
       default: sp = set.run[Math.floor(this.phase) & 7];
     }
     var k = clamp(1 - z / 160, 0.4, 1);
     drawScaled(ctx, p.shadow, x + 36, gy + 2, k, k, 0.5 * k);
-    if (this.state === 'stretch') { drawScaled(ctx, sp, x, gy, 1.08, 0.96, 1); }
+    if (this.state === 'stretch' || (this.state === 'giveup' && this.t < 0.7)) { drawScaled(ctx, sp, x, gy, 1.08, 0.96, 1); }
     else if (this.state === 'stumble') { drawScaled(ctx, sp, x, gy - Math.abs(Math.sin(this.t * 22)) * 3, 1, 1, 1); }
     else draw(ctx, sp, x, gy - z);
     if (this.state === 'crouch') {                                     // 蓄力提示
       var pop = gfx.easeOutBack(clamp(this.t / 0.2, 0, 1));
       PR.hud.text(ctx, '!', x + 44, gy - 92 - pop * 6, { kind: 'bad', size: Math.max(1, Math.round(3 * pop)), align: 'center' });
-    } else if (this.state === 'sit') {
+    } else if (this.state === 'sit' || (this.state === 'giveup' && this.t >= 0.7)) {
       draw(ctx, PR.sprites.props.stick, x + 52, gy - 26, 0.95);       // 嘴里的木棍
-    }
-    if (this.state === 'chase' && this.g.rand() < 0.25) {               // 爪下扬尘
-      this.g.particles.dust(this.x + 6, gy, 1, 1);
     }
   };
 

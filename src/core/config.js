@@ -27,22 +27,24 @@
     STAMINA_DRAIN: 40,      // 蹬车每秒消耗
     STAMINA_REGEN: 24,      // 滑行每秒恢复
     STAMINA_MIN: 8,
-    JUMP_V: 520, GRAVITY: 1700, JUMP_CUT: 0.5,
+    JUMP_V: 520, GRAVITY: 1700,
     JUMP_BUFFER: 0.14,      // 落地前按跳的预输入窗口
     HURT_TIME: 0.75, INVULN: 1.25, SLIP_TIME: 0.8,
 
     // ---- 追狗 ----
-    DOG_GAP_START: 300, DOG_GAP_MAX: 520, DOG_GAP_DIE: 10,
-    DOG_POUNCE_RANGE: 62,   // 距离小于此值可能触发扑咬
-    DOG_TELEGRAPH: 0.5,     // 蓄力（"!"提示）时长
-    DOG_POUNCE_TIME: 0.42,  // 扑出时长
-    DOG_POUNCE_DIST: 86,    // 扑出的相对距离
+    // 狗在身后 150~180 以内会蓄力扑咬：看到"!"后起跳即可闪避；蓄力 + 扑出 = 0.56s 后咬到，所以 0.5s 内起跳都来得及。
+    DOG_GAP_START: 300, DOG_GAP_MAX: 420, DOG_GAP_DIE: 78,   // 追到 78 以内 = 咬到后轮
+    DOG_POUNCE_RANGE: 150,  // 距离小于此值且冷却完毕时扑咬
+    DOG_TELEGRAPH: 0.3,     // 蓄力（"!"提示）时长
+    DOG_POUNCE_TIME: 0.26,  // 扑出时长
     DOG_COOLDOWN: 2.4,      // 扑咬后的冷却
+    DOG_SURGE: 75, DOG_SURGE_TIME: 1.1,   // 野狗间歇性冲刺的加速量与时长
+    DOG_BITE_COINS: 6,      // 被扑中掉落的金币
     DODGE_CLEAR: 26,        // 腾空高度超过此值即完美闪避
 
     // ---- 关卡 ----
-    DAY_LEN: [5200, 6200, 7000, 7800, 8600, 9000],
-    DOG_SPEED: [252, 262, 272, 280, 288, 296],
+    DAY_LEN: [9000, 11000, 13000, 15000, 17000, 19000],       // 每天路程（10 单位 = 1 米）
+    DOG_SPEED: [262, 272, 282, 290, 298, 306],                // 比滑行略快：不蹬车就会被慢慢追上
     TUTORIAL_X: 1500,
     FLAT_BEFORE: 320, FLAT_AFTER: 460,     // 营地前后平坦区
 

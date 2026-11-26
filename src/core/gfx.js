@@ -368,7 +368,7 @@
   Sheet.prototype._ensure = function () {
     if (this.canvas) return;
     this.canvas = this.pix.toCanvas();
-    this.ctx = this.canvas.getContext('2d');
+    this.ctx = this.canvas ? this.canvas.getContext('2d') : null;
     this.hasImage = imageOk(this.ctx);
   };
   // 在图集中放入一个精灵：painter(v, w, h) 用局部坐标作画
@@ -389,22 +389,27 @@
     painter(v, w, h);
     this.pix.clip = null;
     if (opts.outline != null) outlineIn(this.pix, bx, by, bx + cw, by + ch, opts.outline);
+    var sp = { sheet: this, sx: ox, sy: oy, w: w, h: h, ax: opts.ax == null ? (w >> 1) : opts.ax, ay: opts.ay == null ? h - 1 : opts.ay, _c: [bx, by, cw, ch] };
+    this.flush(sp);
+    return sp;
+  };
+  // 只占位不作画：配合分步烘焙（Job）使用
+  Sheet.prototype.reserve = function (w, h, opts) { return this.add(w, h, function () {}, opts || {}); };
+  // 把单元格从像素缓冲写到画布
+  Sheet.prototype.flush = function (sp) {
     this._ensure();
-    if (this.ctx) {
-      if (this.hasImage) {
-        try {
-          var img = this.ctx.createImageData(cw, ch);
-          var dst = new Uint32Array(img.data.buffer, 0, cw * ch), W = this.pix.w, d = this.pix.d;
-          for (var y = 0; y < ch; y++) {
-            dst.set(d.subarray((by + y) * W + bx, (by + y) * W + bx + cw), y * cw);
-          }
-          this.ctx.putImageData(img, bx, by);
-        } catch (e) { this.hasImage = false; paintRects(this.ctx, this.pix, bx, by, cw, ch); }
-      } else {
-        paintRects(this.ctx, this.pix, bx, by, cw, ch);
-      }
+    if (!this.ctx || !sp._c) return;
+    var bx = sp._c[0], by = sp._c[1], cw = sp._c[2], ch = sp._c[3];
+    if (this.hasImage) {
+      try {
+        var img = this.ctx.createImageData(cw, ch);
+        var dst = new Uint32Array(img.data.buffer, 0, cw * ch), W = this.pix.w, d = this.pix.d;
+        for (var y = 0; y < ch; y++) dst.set(d.subarray((by + y) * W + bx, (by + y) * W + bx + cw), y * cw);
+        this.ctx.putImageData(img, bx, by);
+      } catch (e) { this.hasImage = false; paintRects(this.ctx, this.pix, bx, by, cw, ch); }
+    } else {
+      paintRects(this.ctx, this.pix, bx, by, cw, ch);
     }
-    return { sheet: this, sx: ox, sy: oy, w: w, h: h, ax: opts.ax == null ? (w >> 1) : opts.ax, ay: opts.ay == null ? h - 1 : opts.ay };
   };
 
   // 把精灵画到画布（整数坐标，保持像素锐利）

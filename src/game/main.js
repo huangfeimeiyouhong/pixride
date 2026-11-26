@@ -1,815 +1,538 @@
 // src/game/main.js
-// 游戏主控：状态机（菜单 / 游戏中 / 失败 / 胜利）、主循环、渲染与 HUD。
+// 游戏主控：状态机（标题 / 营地 / 骑行 / 结算 / 通关 / 暂停）、固定步长主循环、渲染合成、存档与界面事件分发。
 (function () {
   var g = typeof globalThis !== 'undefined' ? globalThis
     : (typeof window !== 'undefined' ? window
     : (typeof global !== 'undefined' ? global : Function('return this')()));
   var PR = g.PR || (g.PR = {});
-  var cfg = PR.config;
-  var C = PR.gfx.COLORS;
-  var px = PR.gfx.px;
+  var cfg = PR.config, gfx = PR.gfx, clamp = gfx.clamp, draw = gfx.draw, drawScaled = gfx.drawScaled;
 
-  var STATE = { MENU: 'MENU', PLAYING: 'PLAYING', GAMEOVER: 'GAMEOVER', WIN: 'WIN' };
+  var ST = { TITLE: 'TITLE', PLAY: 'PLAY', PAUSE: 'PAUSE', CAMP: 'CAMP', OVER: 'OVER', WIN: 'WIN' };
+  var BAKE_MS = 4;                 // 每帧用于主题烘焙的时间预算（毫秒）
+  var DOG_DUST = 14;               // 野狗奔跑时每秒扬尘次数（期望值）
+  PR.STATES = ST;
 
   PR.Game = function (opts) {
-    this.canvas = opts.canvas;
-    this.ctx = this.canvas.getContext('2d');
-    this.buffer = opts.buffer;
+    var c = this.canvas = opts.canvas, self = this;
+    this.ctx = c.getContext('2d');
+    this.buffer = opts.buffer || PR.sys.createCanvas(64, 64);
     this.bctx = this.buffer.getContext('2d');
+    PR.save.load();                                                        // 以下一次性准备都是幂等的
+    PR.sprites.buildAll();
+    PR.art.buildStatic();
+    PR.hud.init();
+    if (PR.audio && PR.audio.setMuted) PR.audio.setMuted(!PR.save.data.sound);
+    this.dpr = 1; this.bw = 586; this.bh = 330; this.s = 1; this.G = this.bh - cfg.GROUND_H;
+    this.ox = 0; this.oy = 0; this.safe = { l: 0, t: 0, r: 0, b: 0 };
+    this.time = 0; this.uiT = 0; this.state = ST.TITLE; this.mode = 'journey'; this.day = 0; this.runSeed = 0;
+    this.score = 0; this.coins = 0; this.result = null; this.hints = [];
+    this.acc = 0; this.simT = 0; this.lastX = 0; this.camX = 0; this.titleX = 0;
+    this.surgeT = 0; this.surgeCd = 5; this.deathT = 0; this.comboAt = 0; this.tipIdx = 0; this.confirmReset = false;
+    this.job = null; this.bakeQ = []; this.loading = null;
+    this.fpsA = 16; this.q = 1; this.running = false; this.lastT = 0;
+    this.rand = gfx.rng(((Date.now() & 0xffff) + 7) | 0);                  // 可播种随机数（带 range / int / pick），以 g.rand() 形式调用
+    this.fx = new PR.Fx(this);
+    this.particles = new PR.Particles(this);
+    this.terrain = new PR.Terrain(3);
+    this.level = new PR.Level(this); this.level.endX = Infinity;
+    this.player = new PR.Player(this);
+    this.dogs = [new PR.Dog(this, 0, 'yellow')];
+    this.scene = new PR.Scene(this);
+    // 输入映射：指针位置 → 缓冲区坐标；右半屏 = 蹬车区
+    this.cssW = 800; this.cssH = 450;
+    PR.input.mapper = function (cx, cy) {
+      var r = (c.getBoundingClientRect && c.getBoundingClientRect()) || null;
+      var w = (r && r.width) || self.cssW, h = (r && r.height) || self.cssH;
+      return { x: ((cx - (r ? r.left : 0)) * c.width / (w || 1) - self.ox) / self.s, y: ((cy - (r ? r.top : 0)) * c.height / (h || 1) - self.oy) / self.s };
+    };
+    PR.input.sprintZone = function (x) { return x >= self.bw * 0.5; };
+    this.resize(opts.viewW, opts.viewH, opts.dpr, opts.safeArea);
+    this.toTitle();
+  };
+
+  // ---------------- 视口 ----------------
+  // 缓冲区高度取 330 的整数倍（约），再整数倍放大铺满屏幕：像素锐利且没有黑边。竖屏时在屏幕中央留 16:9 的游戏区。
+  PR.Game.prototype.resize = function (vw, vh, dpr, sa) {
+    var c = this.canvas, r;
+    if (vw == null) {
+      r = (c.getBoundingClientRect && c.getBoundingClientRect()) || null;
+      vw = (r && r.width) || c.clientWidth || 0;
+      vh = (r && r.height) || c.clientHeight || 0;
+      if (!vw || !vh) { vw = (typeof window !== 'undefined' && window.innerWidth) || 800; vh = (typeof window !== 'undefined' && window.innerHeight) || 450; }
+    }
+    dpr = dpr || (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+    this.dpr = dpr;
+    this.cssW = vw; this.cssH = vh;
+    var cw = Math.max(1, Math.round(vw * dpr)), ch = Math.max(1, Math.round(vh * dpr));    // 画布物理像素
+    this.ox = 0; this.oy = 0; this.vw = cw; this.vh = ch;
+    if (cw < ch) { this.vh = Math.round(cw * 9 / 16); this.oy = Math.round((ch - this.vh) / 2); }
+    var s = Math.max(1, Math.floor(this.vh / cfg.TARGET_H)), bw, bh;
+    for (;;) { bw = Math.ceil(this.vw / s); bh = Math.ceil(this.vh / s); if (bw <= cfg.MAX_BUFFER_W || s >= 16) break; s++; }
+    this.s = s; this.bw = bw; this.bh = bh; this.G = bh - cfg.GROUND_H;
+    c.width = cw; c.height = ch;
+    this.buffer.width = bw; this.buffer.height = bh;
     this.bctx.imageSmoothingEnabled = false;
-    // 视口：逻辑尺寸（CSS 像素）+ DPR。canvas 物理分辨率 = 逻辑 * DPR，ctx 缩放 DPR，
-    // 这样在高分屏上仍保持像素锐利（buffer 整数放大到逻辑尺寸，再由 DPR 映射到物理像素）。
-    this.dpr = opts.dpr || 1;
-    this.viewW = opts.viewW || this.canvas.width || cfg.BUFFER_W;
-    this.viewH = opts.viewH || this.canvas.height || cfg.BUFFER_H;
-    this.safeArea = opts.safeArea || { left: 0, top: 0, right: this.viewW, bottom: this.viewH };
-    this.paused = false;
-    this._pedalSfxT = 0;
-    this._applyViewport();
-    try {
-      console.log('[PR-Viewport] ' + JSON.stringify({
-        viewW: this.viewW, viewH: this.viewH, dpr: this.dpr,
-        safeArea: this.safeArea, cw: this.canvas.width, ch: this.canvas.height
-      }));
-    } catch (e) {}
-    this.bg = new PR.Background({ width: cfg.BUFFER_W, height: cfg.BUFFER_H, groundY: cfg.GROUND_Y });
-    this.player = new PR.Player();
-    this.dog = new PR.Dog();
-    this.level = new PR.Level({ playerScreenX: cfg.PLAYER_SCREEN_X });
-    this.state = STATE.MENU;
-    this.menuCam = 0;
-    this.shake = 0;
-    this.time = 0;
-    this.lastT = 0;
-    this.bestMeters = this._loadBest();
-    this.bestScore = this._loadBestScore();
-    this.score = 0;
-    this._lastMeters = 0;
-    this.floatTexts = [];        // 拾取/加分漂浮字
-    this._lungeT = cfg.DOG_LUNGE_INTERVAL_START;  // 下次猛扑倒计时
-    this._stickSwingT = 0;       // 挥棒动画剩余
-    this._probeT = 0;
-    this._lastProbeState = null;
-    this._stateEnteredAt = Date.now();
-    this._running = false;
-    this._dbgPrevGrounded = true;
-    this._dbgPrevPedaling = false;
-    this._dbgMaxAirY = 0;
-    this._dbgPedalLogT = 0;
-    this.barkTexts = [];          // 漂浮的"汪汪汪"字
-    this._barkT = 0;              // 狗吠节拍计时
-    this._dogFirstBark = false;   // 狗进入视野后的第一声
-    this._deathT = 0;             // 被咬死亡动画计时
-    this._deathSeq = 0;           // 死亡序列 id，用于取消过期的 setTimeout
-    this._bindLoop();
-  };
-
-  // 把 canvas 物理分辨率设为 逻辑尺寸 * DPR，并让 ctx 以逻辑坐标绘制。
-  PR.Game.prototype._applyViewport = function () {
-    var dpr = this.dpr || 1;
-    try {
-      this.canvas.width = Math.max(1, Math.floor(this.viewW * dpr));
-      this.canvas.height = Math.max(1, Math.floor(this.viewH * dpr));
-    } catch (e) {}
-    var ctx = this.ctx;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.scale(dpr, dpr);
-    ctx.imageSmoothingEnabled = false;
-  };
-
-  PR.Game.prototype.resize = function (viewW, viewH, dpr, safeArea) {
-    if (viewW) this.viewW = viewW;
-    if (viewH) this.viewH = viewH;
-    if (dpr) this.dpr = dpr;
-    if (safeArea) this.safeArea = safeArea;
-    this._applyViewport();
-  };
-
-  PR.Game.prototype.pause = function () { this.paused = true; };
-  PR.Game.prototype.resume = function () { this.paused = false; this.lastT = 0; };
-
-  PR.Game.prototype._sfx = function (name) {
-    try { if (PR.audio && PR.audio.play) PR.audio.play(name); } catch (e) {}
-  };
-
-  PR.Game.prototype._loadBest = function () {
-    try {
-      var v = null;
-      if (typeof tt !== 'undefined' && tt.getStorageSync) v = tt.getStorageSync('pr_best_meters');
-      else if (typeof localStorage !== 'undefined') v = localStorage.getItem('pr_best_meters');
-      var n = parseInt(v, 10);
-      return isNaN(n) ? 0 : n;
-    } catch (e) { return 0; }
-  };
-
-  PR.Game.prototype._saveBest = function () {
-    try {
-      var v = String(this.bestMeters);
-      if (typeof tt !== 'undefined' && tt.setStorageSync) tt.setStorageSync('pr_best_meters', v);
-      else if (typeof localStorage !== 'undefined') localStorage.setItem('pr_best_meters', v);
-    } catch (e) {}
-  };
-
-  PR.Game.prototype._loadBestScore = function () {
-    try {
-      var v = null;
-      if (typeof tt !== 'undefined' && tt.getStorageSync) v = tt.getStorageSync('pr_best_score');
-      else if (typeof localStorage !== 'undefined') v = localStorage.getItem('pr_best_score');
-      var n = parseInt(v, 10);
-      return isNaN(n) ? 0 : n;
-    } catch (e) { return 0; }
-  };
-  PR.Game.prototype._saveBestScore = function () {
-    try {
-      var v = String(this.bestScore);
-      if (typeof tt !== 'undefined' && tt.setStorageSync) tt.setStorageSync('pr_best_score', v);
-      else if (typeof localStorage !== 'undefined') localStorage.setItem('pr_best_score', v);
-    } catch (e) {}
-  };
-
-  // 计算 buffer 矩形相对屏幕安全区的内缩边距，避免 HUD/面板被刘海/状态栏遮挡。
-  PR.Game.prototype._safeInsets = function (ox, oy, dw, dh) {
-    var sa = this.safeArea || {};
-    var l = sa.left != null ? sa.left : 0;
-    var t = sa.top != null ? sa.top : 0;
-    var r = sa.right != null ? sa.right : this.viewW;
-    var b = sa.bottom != null ? sa.bottom : this.viewH;
-    return {
-      l: Math.max(0, l - ox),
-      t: Math.max(0, t - oy),
-      r: Math.max(0, (ox + dw) - r),
-      b: Math.max(0, (oy + dh) - b)
+    // 安全区（刘海 / 圆角）→ 缓冲区坐标下的内缩量
+    var W0 = this.vw / dpr, H0 = this.vh / dpr;
+    sa = sa || { left: 0, top: 0, right: W0, bottom: H0 };
+    this.safe = {
+      l: clamp(sa.left || 0, 0, W0) / dpr / s, t: clamp(sa.top || 0, 0, H0) / dpr / s,
+      r: (W0 - clamp(sa.right == null ? W0 : sa.right, 0, W0)) / dpr / s,
+      b: (H0 - clamp(sa.bottom == null ? H0 : sa.bottom, 0, H0)) / dpr / s
     };
+    this.scene.skyGrad = null; this.scene.shoulder = null; this.fx.grads = {};
   };
 
-  // 调试状态探针：状态变化时必打一条；PLAYING 期间每 0.5s 打一条。
-  // MENU/GAMEOVER/WIN 待机不周期打点，避免刷屏冲掉控制台历史里的事件证据。
-  PR.Game.prototype._emitProbe = function (dt) {
-    var changed = this._lastProbeState !== this.state;
-    if (changed) {
-      this._probeT = 0;
-      this._lastProbeState = this.state;
-      this._logProbe();
-      return;
-    }
-    if (this.state === STATE.PLAYING) {
-      this._probeT += dt;
-      if (this._probeT >= 0.5) {
-        this._probeT = 0;
-        this._logProbe();
-      }
-    }
-  };
-
-  PR.Game.prototype._logProbe = function () {
-    var snap = {
-      state: this.state,
-      worldX: Math.round(this.player.worldX),
-      gap: Math.round(this.gap || 0),
-      stamina: Math.round(this.player.stamina),
-      grounded: !!this.player.grounded,
-      y: Math.round(this.player.y),
-      dtMs: Math.round((this._lastDt || 0) * 1000),
-      gt: Math.round(this.time * 10) / 10
-    };
-    try { console.log('[PR-State] ' + JSON.stringify(snap)); } catch (e) {}
-  };
-
-  PR.Game.prototype._bindLoop = function () {
-    var self = this;
-    this._loop = function () {
-      if (!self._running) return;   // 已被停止（如重载时被新实例取代）则不再调度
-      // 用系统真实时钟 Date.now() 计算 dt：抖音小游戏 rAF 回调频率远高于 60fps，
-      // 且其 performance.now()/回调时间戳都是被加速的合成时钟，会导致游戏时间超速。
-      // Date.now() 读取系统真实时间，能保证游戏速度与真实时间一致。
-      var now = Date.now();
-      if (!self.lastT) self.lastT = now;
-      var dt = (now - self.lastT) / 1000;
-      self.lastT = now;
-      if (dt > 0.05) dt = 0.05;   // 切后台回来防止大跳
-      if (dt < 0) dt = 0;
-      self._lastDt = dt;
-      self.time += dt;
-      self.update(dt);
-      self._emitProbe(dt);
-      self.render();
-      PR.raf(self._loop);
-    };
-  };
-
+  // ---------------- 主循环 ----------------
   PR.Game.prototype.start = function () {
-    if (this._running) return;
-    // 单例：重载时旧实例的 rAF 循环可能仍在跑，先停掉上一个，保证全局只有一个循环
-    if (typeof globalThis !== 'undefined' && globalThis.__PR_stopLoop) {
-      try { globalThis.__PR_stopLoop(); } catch (e) {}
-    }
+    if (this.running) return;
+    this.running = true; this.lastT = 0;
     var self = this;
-    this._running = true;
-    if (typeof globalThis !== 'undefined') {
-      globalThis.__PR_stopLoop = function () { self._running = false; };
+    if (g.__PR_stopLoop) { try { g.__PR_stopLoop(); } catch (e) {} }       // 单例：停掉上一个实例的循环
+    g.__PR_stopLoop = function () { self.running = false; };
+    this.loop = function () {
+      if (!self.running) return;
+      var t = Date.now(), dt = (t - self.lastT) / 1000;                     // 用系统真实时钟：小游戏 rAF 可能是加速的合成时钟
+      self.lastT = t;
+      if (dt > 0.05) dt = 0.05;                                             // 切后台回来防止大跳
+      if (dt > 0) self.frame(dt);
+      PR.raf(self.loop);
+    };
+    PR.raf(this.loop);
+  };
+
+  PR.Game.prototype.frame = function (dt) {
+    this.tick(dt);
+    this.render();
+    this.dispatchUi();
+    PR.input.endFrame();
+  };
+
+  PR.Game.prototype.autoPause = function () { if (this.state === ST.PLAY && !this.player.dead) this.pause(); };
+  PR.Game.prototype.autoResume = function () { this.lastT = 0; };
+  PR.Game.prototype.pause = function () {
+    if (this.state !== ST.PLAY || this.player.dead || this.fx.fading) return;
+    this.state = ST.PAUSE; this.uiT = 0; this.sfx('ui');
+  };
+  PR.Game.prototype.resume = function () {
+    if (this.state !== ST.PAUSE) return;
+    PR.input.reset(); this.state = ST.PLAY; this.uiT = 0; this.lastT = 0; this.sfx('ui');
+  };
+
+  // ---------------- 小工具 ----------------
+  PR.Game.prototype.playerX = function () { return clamp(this.bw * cfg.PLAYER_X_FRAC, cfg.PLAYER_X_MIN, cfg.PLAYER_X_MAX); };
+  PR.Game.prototype.upg = function (key) { return PR.save.data.up[key] || 0; };
+  PR.Game.prototype.scoreNow = function () { return this.score | 0; };
+  PR.Game.prototype.sfx = function (name, rate) { if (PR.audio && PR.audio.play) PR.audio.play(name, rate); };
+  PR.Game.prototype.toggleSound = function () {
+    var d = PR.save.data; d.sound = d.sound ? 0 : 1;
+    if (PR.audio) PR.audio.setMuted(!d.sound);
+    PR.save.write(); this.sfx('ui');
+  };
+
+  // ---------------- 每帧更新 ----------------
+  PR.Game.prototype.tick = function (dt) {
+    this.time += dt; this.uiT += dt;
+    var fx = this.fx, st = this.state, i, k, keys = PR.input.takeKeyTaps();
+    this.fpsA = this.fpsA * 0.94 + dt * 1000 * 0.06;
+    this.q = this.fpsA > 26 ? 0 : 1;                                         // 自适应画质：持续掉帧时降低特效
+    fx.update(dt);                                                            // 淡出的回调可能在这一步切换状态
+    st = this.state;
+    for (i = 0; i < keys.length; i++) {
+      k = keys[i];
+      if (k === 'mute') this.toggleSound();
+      else if (k === 'pause') { if (st === ST.PLAY) this.pause(); else if (st === ST.PAUSE) this.resume(); }
+      else if (k === 'enter') {                                              // 键盘确认 = 各界面的默认按钮
+        if (st === ST.TITLE) this.onUi('start');
+        else if (st === ST.CAMP) this.onUi('next');
+        else if (st === ST.OVER && this.uiT > 0.5) this.onUi('retry');
+        else if (st === ST.PAUSE) this.onUi('resume');
+        else if (st === ST.WIN) this.onUi('endless');
+      }
     }
-    PR.raf(this._loop);
-  };
-
-  PR.Game.prototype.startGame = function () {
-    PR.input.reset();
-    this.player.reset();
-    this.dog.reset();
-    this.level.reset();
-    this.shake = 0;
-    this._dbgPrevGrounded = true;
-    this._dbgPrevPedaling = false;
-    this._dbgMaxAirY = 0;
-    this._dbgPedalLogT = 0;
-    this._pedalSfxT = 0;
-    this.barkTexts = [];
-    this._barkT = 0;
-    this._dogFirstBark = false;
-    this._deathT = 0;
-    this.score = 0;
-    this._lastMeters = 0;
-    this.floatTexts = [];
-    this._lungeT = cfg.DOG_LUNGE_INTERVAL_START;
-    this._stickSwingT = 0;
-    this.state = STATE.PLAYING;
-    this._stateEnteredAt = Date.now();
-    this._sfx('start');
-  };
-
-  PR.Game.prototype.update = function (dt) {
-    if (this.paused) return;   // 切后台：冻结更新，但仍渲染静止帧
-    if (this.shake > 0) this.shake -= dt;   // 屏幕震动在所有状态下衰减（含死亡定格）
-    if (this.state === STATE.MENU) {
-      this.menuCam += 50 * dt;
-      this.bg.update(dt);
-      if (PR.input.consumeAny(this._stateEnteredAt)) this.startGame();
+    if (this.loading != null) {                                              // 主题烘焙中：显示加载画面
+      this.bake(12);
+      if (this.themeReady(this.loading)) { this.scene.setTheme(this.loading); this.loading = null; }
       return;
     }
-    if (this.state === STATE.GAMEOVER || this.state === STATE.WIN) {
-      // 被咬死亡动画在前 ~1.6 秒播放
-      if (this.state === STATE.GAMEOVER && this._deathT < 2) this._deathT += dt;
-      if (PR.input.consumeAny(this._stateEnteredAt)) {
-        this.state = STATE.MENU;
-        this._stateEnteredAt = Date.now();
-        PR.input.reset();
-      }
+    this.bake(st === ST.PLAY ? 2 : BAKE_MS);
+    for (i = this.hints.length - 1; i >= 0; i--) if (this.hints[i].t > this.hints[i].life) this.hints.splice(i, 1);
+    if (st !== ST.PLAY) {
+      if (st === ST.TITLE) this.tickTitle(dt);
+      this.fx.danger += (0 - this.fx.danger) * Math.min(1, dt * 4);
+      this.particles.update(dt);
       return;
     }
-    // PLAYING
-    this.player.update(dt, PR.input);
-    this._updateDogBreed();
-    this.dog.update(dt);
-    this.dog.worldX += this._dogSpeed() * dt;
-    this.level.update(this.player, dt);
+    this.pollTaps();
+    if (this.player.dead) {                                                  // 被追上：定格慢动作后结算
+      this.deathT += dt;
+      if (this.deathT > 1.6) { this.finishRun(false); this.state = ST.OVER; this.uiT = 0; }
+    }
+    var scale = fx.scale(), n = 0;
+    this.acc += dt * scale;
+    while (this.acc >= cfg.STEP && n < 8) {
+      this.step(cfg.STEP); this.acc -= cfg.STEP; n++;
+      if (this.state !== ST.PLAY) { this.acc = 0; break; }
+    }
+    if (n >= 8) this.acc = 0;
+    this.particles.update(dt * (scale > 0.25 ? scale : 0.25));
+  };
 
-    // 里程积分
-    var meters = Math.floor(this.player.worldX);
-    if (meters > this._lastMeters) {
-      this.score += (meters - this._lastMeters) * cfg.SCORE_PER_METER;
-      this._lastMeters = meters;
-    }
+  // 标题画面：骑手与野狗在路上"原地"奔跑，背景缓缓滚动
+  PR.Game.prototype.tickTitle = function (dt) {
+    var p = this.player, i;
+    this.titleX += 150 * dt; this.camX = this.titleX;
+    p.x = this.camX + this.bw * 0.76; p.z = 0; p.pose = 'ride'; p.tilt = 0; p.dead = false;
+    p.pedalPhase += dt * 9; p.wheel += dt * 24; p.hurtT = 0; p.invuln = 0; p.squash = 0; p.wobble = 0;
+    for (i = 0; i < this.dogs.length; i++) { var d = this.dogs[i]; d.x = p.x - 200 - i * 120; d.phase += dt * 11; d.t = 0; d.z = 0; d.hopT = 0; d.state = 'title'; }
+  };
 
-    // 野狗距离
-    var gap = this.player.worldX - this.dog.worldX;
-    if (gap > cfg.DOG_GAP_MAX) { gap = cfg.DOG_GAP_MAX; this.dog.worldX = this.player.worldX - gap; }
-    this.gap = gap;
-
-    // 消费关卡事件（拾取道具 / 成功跳过石头）—— 在距离 clamp 之后，
-    // 这样打狗棒的击退不会被本帧的 gap 上限抵消。
-    var evs = this.level.drainEvents();
-    for (var ei = 0; ei < evs.length; ei++) this._handleEvent(evs[ei]);
-
-    // 狗吠：狗进入视野后开始叫，越近叫得越频繁，同时冒出"汪汪汪"漂浮字
-    if (gap < 170) {
-      if (!this._dogFirstBark) { this._dogFirstBark = true; this._spawnBark(); }
-      var interval = Math.max(0.35, Math.min(0.95, gap / 200));
-      this._barkT += dt;
-      if (this._barkT >= interval) { this._barkT = 0; this._spawnBark(); }
-    }
-    // 更新漂浮字（淡出、上飘）
-    for (var bi = this.barkTexts.length - 1; bi >= 0; bi--) {
-      var bt = this.barkTexts[bi];
-      bt.life += dt; bt.y += bt.vy; bt.x += bt.vx;
-      if (bt.life >= bt.max) this.barkTexts.splice(bi, 1);
-    }
-
-    // 猛扑：间隔随里程缩短；狗被眩晕时不触发
-    if (this.dog.stunT <= 0) {
-      this._lungeT -= dt;
-      if (this._lungeT <= 0) {
-        this.dog.lungeT = cfg.DOG_LUNGE_DURATION;
-        this._sfx('growl');
-        var lprog = Math.min(1, this.player.worldX / cfg.LEVEL_LENGTH);
-        this._lungeT = cfg.DOG_LUNGE_INTERVAL_START -
-          (cfg.DOG_LUNGE_INTERVAL_START - cfg.DOG_LUNGE_INTERVAL_MIN) * lprog;
-      }
-    }
-    // 挥棒动画计时
-    if (this._stickSwingT > 0) this._stickSwingT -= dt;
-    // 拾取/加分漂浮字
-    for (var fi = this.floatTexts.length - 1; fi >= 0; fi--) {
-      var f = this.floatTexts[fi];
-      f.life += dt; f.y += f.vy;
-      if (f.life >= f.max) this.floatTexts.splice(fi, 1);
-    }
-
-    // 调试事件日志（跳跃/蹬车）：写入控制台历史，供自动化验证取证（不受读取延迟影响）
-    if (!this.player.grounded) {
-      if (this.player.y > this._dbgMaxAirY) this._dbgMaxAirY = this.player.y;
-    }
-    if (this._dbgPrevGrounded && !this.player.grounded) {
-      try { console.log('[PR-Jump] takeoff worldX=' + Math.round(this.player.worldX)); } catch (e) {}
-      this._sfx('jump');
-    }
-    if (!this._dbgPrevGrounded && this.player.grounded && this._dbgMaxAirY > 0) {
-      try { console.log('[PR-Jump] landed maxY=' + Math.round(this._dbgMaxAirY) + ' worldX=' + Math.round(this.player.worldX)); } catch (e) {}
-      this._dbgMaxAirY = 0;
-    }
-    this._dbgPrevGrounded = this.player.grounded;
-    if (this.player.pedaling) {
-      this._dbgPedalLogT += dt;
-      if (!this._dbgPrevPedaling || this._dbgPedalLogT >= 0.5) {
-        this._dbgPedalLogT = 0;
-        try { console.log('[PR-Pedal] stamina=' + Math.round(this.player.stamina) + ' gap=' + Math.round(this.gap) + ' worldX=' + Math.round(this.player.worldX)); } catch (e) {}
-      }
-    } else {
-      this._dbgPedalLogT = 0;
-    }
-    this._dbgPrevPedaling = this.player.pedaling;
-
-    // 蹬车音效节拍（按住时周期性触发）
-    if (this.player.pedaling) {
-      this._pedalSfxT += dt;
-      if (this._pedalSfxT >= 0.16) { this._pedalSfxT = 0; this._sfx('pedal'); }
-    } else {
-      this._pedalSfxT = 0;
-    }
-
-    // 撞击：减速 + 狗逼近
-    if (this.level.checkCollision(this.player)) {
-      this.dog.worldX += 55;   // 狗拉近一截
-      this.shake = 0.25;
-      this._sfx('hit');
-    }
-
-    this.bg.update(dt);
-
-    if (this.gap <= cfg.DOG_GAP_MIN) {
-      // 狗贴到骑手身上，定格"被咬"画面 + 震屏 + 咬杀音效 + 一串爆发的"汪汪汪"
-      this.gap = 6;
-      this.dog.worldX = this.player.worldX - 6;
-      this.shake = 0.6;
-      this.state = STATE.GAMEOVER;
-      this._stateEnteredAt = Date.now();
-      this._deathT = 0;
-      this._deathSeq++;
-      this.bestMeters = Math.max(this.bestMeters, Math.floor(this.player.worldX));
-      this._saveBest();
-      this.bestScore = Math.max(this.bestScore, this.score);
-      this._saveBestScore();
-      this._sfx('bite');
-      this._sfx('lose');
-      var self = this, seq = this._deathSeq;
-      for (var k = 0; k < 5; k++) {
-        (function (d) { setTimeout(function () { if (self._deathSeq === seq) self._spawnBark(); }, d); })(k * 90);
-      }
-    } else if (this.level.finished) {
-      this.state = STATE.WIN;
-      this._stateEnteredAt = Date.now();
-      this.bestMeters = Math.max(this.bestMeters, cfg.LEVEL_LENGTH);
-      this._saveBest();
-      this.bestScore = Math.max(this.bestScore, this.score);
-      this._saveBestScore();
-      this._sfx('win');
+  // 游玩中的点按：左半屏（且不在按钮上）= 跳跃；右半屏按住 = 蹬车（由 input.isSprintHeld 处理）
+  PR.Game.prototype.pollTaps = function () {
+    var taps = PR.input.taps, i, t;
+    for (i = 0; i < taps.length; i++) {
+      t = taps[i];
+      if (t.used || PR.input.isUi(t)) continue;
+      if (!PR.input.sprintZone(t.x, t.y)) { PR.input.jumpQ++; t.used = true; }
     }
   };
 
+  // ---------------- 模拟（固定步长） ----------------
+  PR.Game.prototype.step = function (dt) {
+    var p = this.player, dogs = this.dogs, i, d, fx = this.fx, part = this.particles, live = !p.dead && !this.level.finished;
+    this.simT += dt;
+    p.update(dt);
+    this.camX += (p.x - this.playerX() - Math.max(0, p.v - 250) * 0.3 - this.camX) * Math.min(1, dt * 3);   // 镜头：高速时略向前看
+    this.surge(dt);
+    for (i = 0; i < dogs.length; i++) {
+      d = dogs[i];
+      d.update(dt);
+      if ((d.state === 'chase' || d.state === 'pounce') && this.rand() < dt * (this.surgeT > 0 && i === 0 ? 46 : DOG_DUST)) part.dust(d.x + 6, d.groundY(), 1, 1);
+    }
+    this.level.update(dt);
+    this.score += Math.max(0, p.x - this.lastX) * 0.1;                      // 里程分：每 10 单位 1 分
+    this.lastX = p.x;
+    this.sprintT = p.sprinting ? this.sprintT + dt : 0;
+    // 无尽模式：每隔一段距离换一个主题
+    if (this.mode === 'endless' && live) {
+      var ti = this.level.themeAt(p.x);
+      if (ti !== this.level.theme) { this.switchTheme(ti); }
+      this.requestTheme(this.level.themeAt(p.x + 1400));
+    }
+    // 危险红边：野狗贴近时渐显
+    var gap = dogs[0].gap(), danger = live && dogs[0].state !== 'fetch' && dogs[0].state !== 'sit' && dogs[0].state !== 'stretch' ? clamp((230 - gap) / 200, 0, 1) : 0;
+    fx.danger += (danger - fx.danger) * Math.min(1, dt * 4);
+    this.tickHints(dt);
+  };
+
+  // 野狗间歇冲刺：距离较远时突然加速逼近（带"!"预警与扬尘）
+  PR.Game.prototype.surge = function (dt) {
+    var d = this.dogs[0], p = this.player;
+    if (this.surgeT > 0) { this.surgeT -= dt; return; }
+    if (p.dead || this.level.finished || d.state !== 'chase') return;
+    this.surgeCd -= dt;
+    if (this.surgeCd > 0) return;
+    var gap = d.gap();
+    if (gap < 200 || gap > 500) return;
+    this.surgeT = cfg.DOG_SURGE_TIME;
+    this.surgeCd = (this.mode === 'endless' ? 5.4 - Math.min(1.6, p.x / 9000) : 5.6 - this.day * 0.4) + this.rand() * 1.6;
+    this.fx.text(d.x + 40, d.groundY() - 112, '!', 'bad', true);
+    this.fx.shake(0.1);
+    this.sfx('bark');
+  };
+
+  // 野狗相关数值：随天数 / 无尽距离提高
+  PR.Game.prototype.dogSpeed = function (dog) {
+    var p = this.player, base = this.mode === 'endless' ? 252 + Math.min(70, p.x / 300) : cfg.DOG_SPEED[Math.min(5, this.day)];
+    if (dog && dog.idx > 0) base -= 12;                                      // 第二条狗稍慢，错开队形
+    if (this.surgeT > 0 && (!dog || dog.idx === 0)) base += cfg.DOG_SURGE;
+    return base;
+  };
+  PR.Game.prototype.pounceRange = function () { return cfg.DOG_POUNCE_RANGE + (this.mode === 'endless' ? Math.min(40, this.player.x / 600) : this.day * 6); };
+  // 蓄力时长：随天数略缩短（到第 6 天 0.24s）。蓄力 + 扑出 ≈ 0.56s 后咬到，所以看到"!"后 0.5s 内起跳都来得及
+  PR.Game.prototype.telegraphTime = function () { return cfg.DOG_TELEGRAPH - (this.mode === 'endless' ? Math.min(0.06, this.player.x / 500000) : this.day * 0.012); };
+  PR.Game.prototype.dogFailChance = function () { return 0.3 - (this.mode === 'endless' ? Math.min(0.18, this.player.x / 90000) : this.day * 0.036); };
+
+  // ---------------- 教学提示 ----------------
+  PR.Game.prototype.hintOn = function (bit) { for (var i = 0; i < this.hints.length; i++) if (this.hints[i].bit === bit) return true; return false; };
+  PR.Game.prototype.hint = function (bit, str, x, y, zone, color, life) {
+    if ((PR.save.data.tut & bit) || this.hintOn(bit)) return;
+    this.hints.push({ bit: bit, str: str, x: x, y: y, zone: zone, color: color, t: 0, life: life || 8 });
+  };
+  // 完成了对应操作：提示消失，并记入存档（之后不再提示）
+  PR.Game.prototype.learn = function (bit) {
+    var i, learned = PR.save.data.tut & bit;
+    for (i = this.hints.length - 1; i >= 0; i--) if (this.hints[i].bit === bit && this.hints[i].t > 0.25) this.hints.splice(i, 1);
+    if (!learned && !(PR.save.data.tut & bit)) { PR.save.data.tut |= bit; PR.save.write(); }
+  };
+  PR.Game.prototype.tickHints = function (dt) {
+    var p = this.player, t = this.simT, tut = PR.save.data.tut, i;
+    for (i = 0; i < this.hints.length; i++) this.hints[i].t += dt;
+    if (p.dead) return;
+    if (!(tut & 1)) { if (t > 0.8 && p.x > 120) this.hint(1, '点按左屏：跳跃', 0.25, 0.5, true, '#6cc6ff'); }
+    else if (!(tut & 2) && t > 1.2 && this.day === 0 && this.mode === 'journey') this.hint(2, '按住右屏：蹬车加速', 0.75, 0.5, true, '#ffb347');
+    if (p.sprinting && this.sprintT > 0.4) this.learn(2);
+  };
+
+  // ---------------- 事件回调（由实体 / 关卡调用） ----------------
+  PR.Game.prototype.addScore = function (n, wx, wy, str, kind, big) {
+    this.score += n;
+    if (str) this.fx.text(wx, wy, str, kind, big);
+  };
+  PR.Game.prototype.collect = function (it) {
+    var p = this.player, y = this.G - this.terrain.h(it.x) - it.z - 30;
+    p.stats.items++;
+    switch (it.kind) {
+      case 'coin':
+        this.coins++; this.addScore(10 * p.comboMult());
+        this.sfx('coin', 1 + Math.min(0.6, p.combo * 0.05));               // 连击越高音调越高
+        this.particles.sparkle(it.x, y + 16);
+        break;
+      case 'drink':
+        p.stam = Math.min(p.stamMax(), p.stam + p.stamMax() * 0.35);
+        this.fx.text(it.x, y, '体力 +35', 'good'); this.sfx('pickup'); break;
+      case 'stick':
+        if (p.sticks < 3) p.sticks++;
+        this.fx.text(it.x, y, '木棍! 狗追近时自动扔出', 'good'); this.sfx('pickup'); break;
+      case 'magnet':
+        p.magnetT = 8; this.fx.text(it.x, y, '磁铁!', 'shield'); this.sfx('magnet'); break;
+      case 'gel':
+        p.boostT = 4; this.fx.text(it.x, y - 4, '能量胶! 冲刺', 'gold', true); this.sfx('boost'); this.fx.flash(0.12, '#ffe08a'); break;
+      default:
+        p.shield = true; this.fx.text(it.x, y, '护盾!', 'shield'); this.sfx('shield');
+    }
+  };
+  PR.Game.prototype.onJump = function () { this.learn(1); };
+  PR.Game.prototype.onTelegraph = function () { this.hint(4, '狗低吼时 → 起跳闪避', 0.22, 0.4, false, null, 5); };
+  PR.Game.prototype.onDodge = function (dog) {
+    var p = this.player, gy = p.groundY();
+    p.stats.dodges++;
+    this.addScore(25 * p.comboMult(), p.x + 20, gy - 124, '完美闪避!', 'shield', true);
+    this.fx.slowmo(0.32, 0.4); this.fx.shake(0.12);
+    this.particles.ring(dog.x + 40, dog.groundY() - 30, 2.2); this.particles.sparkle(p.x + 26, gy - 60);
+    this.sfx('whiff'); this.learn(4);
+  };
+  // 被咬：扑击中 = 摔一跤、掉金币，野狗仍贴在身后（必须马上蹬车拉开）；被追到身后 = 骑行结束
+  PR.Game.prototype.onBite = function (dog) {
+    if (this.player.dead) return;
+    if (dog.state === 'pounce') this.pounceHit(dog); else this.kill();
+  };
+  PR.Game.prototype.pounceHit = function (dog) {
+    var p = this.player, fx = this.fx, gy = p.groundY(), lost = Math.min(this.coins, cfg.DOG_BITE_COINS);
+    dog.fed = true;
+    p.v = 70; p.hurtT = 0.85; p.z = 0; p.vz = 0; p.onGround = true; p.slipT = 0; p.boostT = 0;
+    p.combo = 0; p.comboT = 0; p.stats.bites++;
+    this.coins -= lost;
+    fx.shake(0.7); fx.stop(0.09); fx.flash(0.3, '#ff6a5e');
+    this.particles.stars(p.x + 26, gy - 50, 10); this.particles.dust(p.x + 10, gy, 6, 1);
+    this.sfx('crash'); this.sfx('bark');
+    fx.text(p.x + 20, gy - 116, lost ? '被咬住! -' + lost + ' 金币' : '被咬住了!', 'bad', true);
+    if (!(PR.save.data.tut & 4)) fx.say('快蹬车甩开它!', '按住右屏 / Shift', 2.2);
+  };
+  PR.Game.prototype.kill = function () {
+    var p = this.player, gy = p.groundY(), i;
+    p.dead = true; p.deadT = 0; p.hurtT = 0; p.z = 0; p.vz = 0; p.onGround = true;
+    this.deathT = 0;
+    this.fx.shake(0.9); this.fx.stop(0.12); this.fx.flash(0.4, '#ff4d4d'); this.fx.slowmo(1.1, 0.3);
+    this.fx.say('被追上了!', '', 1.6);
+    this.particles.spark(p.x + 30, gy - 20, 10); this.particles.dust(p.x + 10, gy, 8, 1);
+    for (i = 0; i < this.dogs.length; i++) this.dogs[i].start('giveup');
+    this.sfx('lose'); this.sfx('bark');
+    this.bgm(null);
+  };
+  PR.Game.prototype.onArrive = function () {
+    this.fx.say('抵达营地', this.level.def.name, 2.2); this.sfx('camp');
+    this.particles.confetti(this.player.x + 90, this.G - 150, 36);
+  };
+  PR.Game.prototype.onDayDone = function () {
+    this.finishRun(true);
+    if (this.mode === 'journey' && this.day >= 5) { this.state = ST.WIN; this.sfx('win'); }
+    else { this.state = ST.CAMP; this.requestTheme(Math.min(5, this.day + 1)); }
+    this.uiT = 0;
+  };
+  PR.Game.prototype.bgm = function (kind) { if (PR.audio && PR.audio.bgm) PR.audio.bgm(kind); };
+
+  // ---------------- 一局流程 ----------------
+  PR.Game.prototype.startRun = function (mode, day) {
+    var p = this.player, breeds, i;
+    this.mode = mode; this.day = day; this.runSeed = (Math.random() * 1e6) | 0;
+    PR.input.reset(); this.fx.clear(); this.particles.clear(); this.hints.length = 0;
+    this.terrain = new PR.Terrain(day * 131 + (mode === 'endless' ? 5000 : 0) + 17);
+    if (mode === 'journey') this.terrain.addFlat(cfg.DAY_LEN[day] - cfg.FLAT_AFTER, cfg.DAY_LEN[day] + 300);   // 营地前后平坦
+    this.level.start(day, mode, 0);
+    p.reset(0);
+    breeds = this.level.def.dogs;
+    this.dogs.length = 0;
+    for (i = 0; i < Math.min(2, breeds.length); i++) { this.dogs.push(new PR.Dog(this, i, breeds[i])); this.dogs[i].reset(cfg.DOG_GAP_START + i * 90); }
+    this.score = 0; this.coins = 0; this.result = null; this.lastX = 0; this.acc = 0; this.simT = 0; this.deathT = 0;
+    this.surgeT = 0; this.surgeCd = 4.5; this.sprintT = 0; this.comboAt = 0; this.confirmReset = false;
+    this.tipIdx = (Math.random() * 8) | 0;
+    this.camX = p.x - this.playerX();
+    this.state = ST.PLAY; this.uiT = 0;
+    this.useTheme(this.level.theme);
+    if (mode === 'endless') this.requestTheme(this.level.themeAt(1400));
+    this.fx.fadeIn();
+    this.level.fill();
+    this.sfx('start'); this.bgm(PR.audio && PR.audio.bgmFor ? PR.audio.bgmFor(this.level.theme) : null);
+  };
+
+  // 一局结束（到站或被追上）：结算、写存档。金币无论如何都会留下；星级只在到站时结算
+  PR.Game.prototype.finishRun = function (win) {
+    var d = PR.save.data, p = this.player, st = p.stats, r = this.result = {};
+    r.win = !!win; r.coins = this.coins; r.stumbles = st.stumbles; r.bites = st.bites; r.dist = p.x / 10 | 0;
+    r.score = this.scoreNow(); r.combo = p.bestCombo; r.dodges = st.dodges; r.stars = 0; r.bonus = 0;
+    if (win && this.mode === 'journey') {                                     // 星级：失误（摔车 / 被咬）占比
+      var misses = st.stumbles + st.bites * 1.5, total = Math.max(8, st.clean + st.stumbles);
+      r.stars = misses <= 0.12 * total ? 3 : (misses <= 0.35 * total ? 2 : 1);
+      r.bonus = 30 + r.stars * 10;
+      d.stars[this.day] = Math.max(d.stars[this.day], r.stars);
+      if (this.day >= 5) d.done = true; else d.day = this.day + 1;
+    }
+    d.coins += r.coins + r.bonus;
+    r.newBest = r.score > d.best.score;
+    d.best.score = Math.max(d.best.score, r.score);
+    d.best.dist = Math.max(d.best.dist, r.dist); d.best.combo = Math.max(d.best.combo, r.combo);
+    if (this.mode === 'endless') { r.best = d.best.endless; d.best.endless = Math.max(d.best.endless, r.dist); }
+    PR.save.write();
+  };
+  PR.Game.prototype.buy = function (i) {
+    var d = PR.save.data, up = cfg.UPGRADES[i], lv = d.up[up.key], cost;
+    if (lv >= up.max) { this.sfx('deny'); return; }
+    cost = cfg.UPGRADE_COST[lv];
+    if (d.coins < cost) { this.sfx('deny'); return; }
+    d.coins -= cost; d.up[up.key]++; PR.save.write();
+    this.sfx('buy'); this.particles.confetti(this.bw * 0.5, this.bh * 0.22, 18);
+  };
+  PR.Game.prototype.toTitle = function () {
+    var ti = (PR.save.data.done && PR.save.data.day >= 5) ? 0 : PR.save.data.day;
+    this.state = ST.TITLE; this.uiT = 0; this.confirmReset = false;
+    this.fx.fadeIn(); this.fx.danger = 0; this.fx.banner = null; this.fx.texts.length = 0;
+    this.setTitleTheme(ti);
+    this.bgm(PR.audio && PR.audio.bgmFor ? PR.audio.bgmFor(ti) : null);
+  };
+  PR.Game.prototype.setTitleTheme = function (ti) {
+    var dogs = PR.themes[ti].dogs, i;
+    this.day = ti; this.titleX = 0; this.dogs.length = 0;
+    for (i = 0; i < Math.min(2, dogs.length); i++) this.dogs.push(new PR.Dog(this, i, dogs[i]));
+    this.useTheme(ti);
+    if (PR.save.data.done) this.requestTheme(0);
+  };
+
+  // ---------------- 主题图集：按帧预算分片烘焙 ----------------
+  PR.Game.prototype.themeReady = function (ti) { return this.scene.themeIndex === ti || !!this.scene.cache[ti]; };
+  PR.Game.prototype.requestTheme = function (ti) {
+    if (this.themeReady(ti) || this.bakeQ.indexOf(ti) >= 0 || (this.job && this.job.ti === ti)) return;
+    this.bakeQ.push(ti);
+  };
+  PR.Game.prototype.useTheme = function (ti) {
+    this.requestTheme(ti);
+    if (this.themeReady(ti)) { this.scene.setTheme(ti); return true; }
+    this.loading = ti;
+    return false;
+  };
+  PR.Game.prototype.switchTheme = function (ti) {
+    var dogs = PR.themes[ti].dogs, i;
+    this.level.setTheme(ti); this.scene.setTheme(ti);
+    for (i = 0; i < this.dogs.length; i++) this.dogs[i].setBreed(dogs[i % dogs.length]);
+    this.fx.flash(0.45, '#ffffff'); this.fx.say(PR.themes[ti].name, '', 1.6);
+    this.bgm(PR.audio && PR.audio.bgmFor ? PR.audio.bgmFor(ti) : null);
+  };
+  PR.Game.prototype.bake = function (budget) {
+    var t0 = Date.now(), sc = this.scene;
+    while (Date.now() - t0 < budget) {
+      if (!this.job) { if (!this.bakeQ.length) return; this.job = new PR.art.Job(this.bakeQ.shift()); }
+      if (this.job.step()) { this.job.art.sheet.pix = null; sc.cache[this.job.ti] = this.job.art; this.job = null; }
+    }
+  };
+
+  // ---------------- 界面事件 ----------------
+  PR.Game.prototype.dispatchUi = function () {
+    var ids = PR.hud.hit(), i;
+    for (i = 0; i < ids.length; i++) this.onUi(ids[i]);
+  };
+  PR.Game.prototype.fade = function (cb) { this.sfx('ui'); this.fx.fadeOut(cb); };
+  PR.Game.prototype.onUi = function (id) {
+    var st = this.state, fx = this.fx, d = PR.save.data, self = this;
+    if (st === ST.PLAY) { if (id === 'pause') this.pause(); return; }
+    if (this.loading != null) return;
+    if (id === 'cancel') { this.confirmReset = false; this.sfx('ui'); return; }
+    if (fx.fading || fx.fadeA > 0.01) return;                                 // 转场中不响应，避免连点
+    if (st === ST.TITLE) {
+      if (id === 'start') this.fade(function () { self.startRun('journey', self.day); });
+      else if (id === 'endless') { if (!d.done) { this.sfx('deny'); return; } this.fade(function () { self.startRun('endless', 0); }); }
+      else if (id === 'sound') this.toggleSound();
+      else if (id === 'reset') { this.confirmReset = true; this.sfx('ui'); }
+      else if (id === 'resetYes') {
+        PR.save.reset(); this.confirmReset = false; this.sfx('buy');
+        if (PR.audio && PR.audio.setMuted) PR.audio.setMuted(!PR.save.data.sound);
+        this.setTitleTheme(0);
+      }
+    } else if (st === ST.CAMP) {
+      if (id === 'next') this.fade(function () { self.startRun('journey', self.day + 1); });
+      else if (id.length > 2 && id.slice(0, 2) === 'up') this.buy(+id.slice(2));
+    } else if (st === ST.OVER) {
+      if (id === 'retry') this.fade(function () { self.startRun(self.mode, self.day); });
+      else if (id === 'title') this.fade(function () { self.toTitle(); });
+    } else if (st === ST.WIN) {
+      if (id === 'endless') this.fade(function () { self.startRun('endless', 0); });
+      else if (id === 'title') this.fade(function () { self.toTitle(); });
+    } else if (st === ST.PAUSE) {
+      if (id === 'resume') this.resume();
+      else if (id === 'restart') { d.coins += this.coins; PR.save.write(); this.fade(function () { self.startRun(self.mode, self.day); }); }
+      else if (id === 'title') { d.coins += this.coins; PR.save.write(); this.fade(function () { self.toTitle(); }); }
+      else if (id === 'sound') this.toggleSound();
+    }
+  };
+
+  // ---------------- 渲染 ----------------
+  // 世界画在低分辨率缓冲区（整数倍放大铺满屏幕，像素锐利）；界面直接画在主画布上（文字清晰）。
   PR.Game.prototype.render = function () {
-    var ctx = this.ctx, bctx = this.bctx;
-    // 用逻辑视口尺寸（CSS 像素）布局；canvas 物理像素已由 _applyViewport 按 DPR 设置，
-    // ctx 已缩放 DPR，所以这里所有坐标都是逻辑坐标。
-    var sw = this.viewW || cfg.BUFFER_W;
-    var sh = this.viewH || cfg.BUFFER_H;
-
-    // 清屏（黑边letterbox）
-    ctx.fillStyle = '#0b0d17';
-    ctx.fillRect(0, 0, sw, sh);
-    bctx.clearRect(0, 0, cfg.BUFFER_W, cfg.BUFFER_H);
-
-    var camX = (this.state === STATE.MENU) ? this.menuCam : this.player.worldX;
-
-    // 背景
-    this.bg.draw(bctx, camX);
-
-    if (this.state === STATE.MENU) {
-      // 菜单：静态骑行者（车轮慢转）+ 标题由主画布叠加
-      this.player.draw(bctx, cfg.PLAYER_SCREEN_X, cfg.GROUND_Y);
-    } else {
-      // 障碍
-      this.level.draw(bctx, this.player);
-      // 野狗（屏幕左侧追入）
-      var dogSX = cfg.PLAYER_SCREEN_X - Math.round(this.gap);
-      if (dogSX > -45) this.dog.draw(bctx, dogSX, cfg.GROUND_Y, this.gap);
-      // 骑行者
-      this.player.draw(bctx, cfg.PLAYER_SCREEN_X, cfg.GROUND_Y);
-      if (this._stickSwingT > 0) this.drawStickSwing(bctx);
-      // "汪汪汪"漂浮字
-      this.drawBarkTexts(bctx);
-      // 拾取/加分漂浮字
-      this.drawFloatTexts(bctx);
+    var ctx = this.ctx, b = this.bctx, s = this.s, W = this.bw, H = this.bh, st = this.state, fx = this.fx, i, o;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#070910'; ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    if (this.loading != null) { this.drawLoading(); return; }
+    var p = this.player, camX = this.camX, shx = fx.sx, shy = fx.sy, def = this.scene.def, lv = this.level;
+    this.shy = shy;
+    b.setTransform(1, 0, 0, 1, 0, 0);
+    b.fillStyle = def.haze.c; b.fillRect(0, 0, W, H);                      // 震屏时露出的边缘
+    b.setTransform(1, 0, 0, 1, shx, shy);
+    b.imageSmoothingEnabled = false;
+    this.scene.drawBack(b, camX, shy, null);
+    if (st !== ST.TITLE) {
+      lv.drawCamp(b, camX, shy);
+      for (i = 0; i < lv.obs.length; i++) { o = lv.obs[i]; if (o.x - camX > -260 && o.x - camX < W + 260) o.draw(b, camX, shy, 0); }
+      for (i = 0; i < lv.obs.length; i++) { o = lv.obs[i]; if (o.x - camX > -260 && o.x - camX < W + 260) o.draw(b, camX, shy, 1); }
+      for (i = 0; i < lv.items.length; i++) { o = lv.items[i]; if (o.x - camX > -60 && o.x - camX < W + 60) o.draw(b, camX, shy); }
+      lv.drawSticks(b, camX, shy);
     }
-
-    // 屏幕震动偏移
-    var sx = 0, sy = 0;
-    if (this.shake > 0) {
-      var s = this.shake * 6;
-      sx = (Math.random() * 2 - 1) * s;
-      sy = (Math.random() * 2 - 1) * s;
-    }
-
-    // 放大到主画布（整数缩放，保持像素锐利）
-    var scale = Math.max(1, Math.floor(Math.min(sw / cfg.BUFFER_W, sh / cfg.BUFFER_H)));
-    var dw = cfg.BUFFER_W * scale, dh = cfg.BUFFER_H * scale;
-    var ox = Math.floor((sw - dw) / 2) + sx;
-    var oy = Math.floor((sh - dh) / 2) + sy;
+    for (i = 0; i < this.dogs.length; i++) this.dogs[i].draw(b, camX, shy);
+    p.draw(b, camX, shy);
+    this.particles.draw(b, camX);
+    this.scene.drawFrontAll(b, camX, shx);
+    var fast = p.sprinting && p.v > 380 ? clamp((p.v - 380) / 60, 0, 0.7) : (p.boostT > 0 ? 1 : 0);
+    if (this.q && fast > 0.02 && st === ST.PLAY) fx.speedLines(b, W, H, fast, this.time);
+    if (def.weather.kind) fx.weather(b, camX, W, H, this.time, def.weather.kind, this.q ? def.weather.n : Math.ceil(def.weather.n / 2));
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(this.buffer, 0, 0, cfg.BUFFER_W, cfg.BUFFER_H, ox, oy, dw, dh);
-
-    // 像素外框
-    ctx.strokeStyle = '#000';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(ox - 1, oy - 1, dw + 2, dh + 2);
-
-    // 触屏按下反馈（PLAYING 时，左右区域高亮）
-    this.drawTouchFeedback(ctx, ox, oy, dw, dh);
-
-    // HUD（ crisp 文本，画在主画布）
-    this.drawHUD(ctx, ox, oy, dw, dh, scale);
-
-    // 覆盖层
-    if (this.state === STATE.MENU) this.drawMenu(ctx, ox, oy, dw, dh, scale);
-    else if (this.state === STATE.GAMEOVER) this.drawGameOver(ctx, ox, oy, dw, dh, scale);
-    else if (this.state === STATE.WIN) this.drawWin(ctx, ox, oy, dw, dh, scale);
+    ctx.drawImage(this.buffer, 0, 0, W, H, this.ox, this.oy, W * s, H * s);
+    ctx.setTransform(s, 0, 0, s, this.ox, this.oy);
+    fx.overlay(ctx, W, H, { night: def.stars ? 0.26 : 0 });
+    fx.drawTexts(ctx, camX, PR.hud, W);
+    PR.hud.begin();
+    if (st === ST.PLAY) { PR.hud.play(ctx, this); PR.hud.hints(ctx, this); }
+    else if (st === ST.TITLE) PR.screens.title(ctx, this);
+    else if (st === ST.CAMP) PR.screens.camp(ctx, this);
+    else if (st === ST.OVER) PR.screens.over(ctx, this);
+    else if (st === ST.WIN) PR.screens.win(ctx, this);
+    else if (st === ST.PAUSE) PR.screens.pause(ctx, this);
   };
 
-  // 触屏视觉反馈：左半屏按下→蓝色高亮+跳跃图标，右半屏按住→橙色高亮+蹬车图标。
-  PR.Game.prototype.drawTouchFeedback = function (ctx, ox, oy, dw, dh) {
-    if (this.state !== STATE.PLAYING) return;
-    var leftHeld = false, rightHeld = false;
-    try {
-      leftHeld = PR.input.isJumpHeld();
-      rightHeld = PR.input.isPedalHeld();
-    } catch (e) {}
-    var split = ox + dw * 0.45;
-    ctx.save();
-    if (leftHeld) {
-      ctx.fillStyle = 'rgba(120,200,255,0.22)';
-      ctx.fillRect(ox, oy, split - ox, dh);
-      ctx.fillStyle = 'rgba(210,240,255,0.95)';
-      ctx.font = 'bold ' + Math.round(22 * (dw / cfg.BUFFER_W)) + 'px monospace';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('↑', ox + (split - ox) / 2, oy + dh / 2);
-    }
-    if (rightHeld) {
-      ctx.fillStyle = 'rgba(255,200,120,0.22)';
-      ctx.fillRect(split, oy, ox + dw - split, dh);
-      ctx.fillStyle = 'rgba(255,235,180,0.95)';
-      ctx.font = 'bold ' + Math.round(22 * (dw / cfg.BUFFER_W)) + 'px monospace';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('»', split + (ox + dw - split) / 2, oy + dh / 2);
-    }
-    // 左右区分隔细线（淡）
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(split + 0.5, oy); ctx.lineTo(split + 0.5, oy + dh); ctx.stroke();
-    ctx.restore();
-  };
-
-  PR.Game.prototype.drawHUD = function (ctx, ox, oy, dw, dh, scale) {
-    if (this.state !== STATE.PLAYING) return;
-    var pad = 6 * scale;
-    // 安全区内缩：buffer 矩形若侵入刘海/状态栏区域，把内容往里推
-    var ins = this._safeInsets(ox, oy, dw, dh);
-    var padL = Math.max(pad, ins.l);
-    var padT = Math.max(pad, ins.t);
-    var padR = Math.max(pad, ins.r);
-    var x = ox + padL, y = oy + padT;
-
-    // 进度条（顶部）
-    var pw = dw - padL - padR, ph = 6 * scale;
-    ctx.fillStyle = C.hudBg;
-    ctx.fillRect(x, y, pw, ph);
-    var prog = this.level.progress(this.player);
-    ctx.fillStyle = '#ffd56b';
-    ctx.fillRect(x, y, Math.max(ph, pw * prog), ph);
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x + 0.5, y + 0.5, pw - 1, ph - 1);
-
-    // 里程 / 关卡名
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold ' + Math.round(11 * scale) + 'px monospace';
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'left';
-    ctx.fillText('DAY 1 · 被野狗追   大理→拉萨', x, y + ph + 4 * scale);
-
-    var meters = Math.floor(this.player.worldX);
-    ctx.textAlign = 'right';
-    ctx.fillText(meters + 'm / ' + cfg.LEVEL_LENGTH + 'm', ox + dw - padR, y + ph + 4 * scale);
-
-    // 体力条（左上第二条）
-    var by = y + ph + 22 * scale;
-    var bw = 90 * scale, bh = 8 * scale;
-    ctx.fillStyle = C.hudBg;
-    ctx.fillRect(x, by, bw, bh);
-    var ratio = this.player.stamina / cfg.STAMINA_MAX;
-    ctx.fillStyle = ratio > 0.3 ? '#5fd35f' : '#e63946';
-    ctx.fillRect(x, by, bw * ratio, bh);
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-    ctx.strokeRect(x + 0.5, by + 0.5, bw - 1, bh - 1);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold ' + Math.round(9 * scale) + 'px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText('体力', x, by + bh + 2 * scale);
-
-    // 分数 / 最佳（左下第三行）
-    var sy = by + bh + 14 * scale;
-    ctx.font = 'bold ' + Math.round(10 * scale) + 'px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#ffd56b';
-    ctx.fillText('分数 ' + this.score, x, sy);
-    ctx.fillStyle = '#9ad8ff';
-    ctx.fillText('最佳 ' + this.bestScore, x + 74 * scale, sy);
-
-    // 野狗距离警示（右上）
-    var gapTxt = Math.round(this.gap) + 'm';
-    var danger = this.gap < 70;
-    ctx.font = 'bold ' + Math.round(13 * scale) + 'px monospace';
-    ctx.textAlign = 'right';
-    ctx.fillStyle = danger ? '#ff4d4d' : '#fff';
-    ctx.fillText(this.dog.label() + ' ' + gapTxt, ox + dw - pad, by);
-    // 猛扑中：距离字变红 + "!" 警示
-    if (this.dog.lungeT > 0) {
-      ctx.fillStyle = '#ff4d4d';
-      ctx.fillText(this.dog.label() + ' 猛扑！' + gapTxt, ox + dw - pad, by);
-    }
-    if (danger) {
-      // 红色警示闪烁边
-      if (Math.floor(this.time * 6) % 2 === 0) {
-        ctx.strokeStyle = 'rgba(255,60,60,0.8)';
-        ctx.lineWidth = 3;
-        ctx.strokeRect(ox + 1, oy + 1, dw - 2, dh - 2);
-      }
-    }
-
-    // 操作提示（底部，仅前几秒）
-    if (this.player.worldX < 260) {
-      ctx.font = 'bold ' + Math.round(9 * scale) + 'px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.fillText('左屏=跳跃  右屏=蹬车 · 吃金币 捡打狗棒击退野狗', ox + dw / 2, oy + dh - 14 * scale);
-    }
-  };
-
-  PR.Game.prototype.panel = function (ctx, ox, oy, dw, dh) {
-    ctx.fillStyle = 'rgba(8,10,22,0.78)';
-    ctx.fillRect(ox, oy, dw, dh);
-    ctx.strokeStyle = '#ffd56b';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(ox + 2, oy + 2, dw - 4, dh - 4);
-  };
-
-  PR.Game.prototype.drawMenu = function (ctx, ox, oy, dw, dh, scale) {
-    this.panel(ctx, ox, oy, dw, dh);
-    var ins = this._safeInsets(ox, oy, dw, dh);
-    oy = oy + ins.t; dh = dh - ins.t - ins.b;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    var cx = ox + dw / 2;
-    ctx.fillStyle = '#ffd56b';
-    ctx.font = 'bold ' + Math.round(26 * scale) + 'px monospace';
-    ctx.fillText('像素骑行', cx, oy + dh * 0.28);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold ' + Math.round(13 * scale) + 'px monospace';
-    ctx.fillText('滇藏线 · 大理 → 拉萨', cx, oy + dh * 0.40);
-    ctx.fillStyle = '#9ad8ff';
-    ctx.font = 'bold ' + Math.round(11 * scale) + 'px monospace';
-    ctx.fillText('DAY 1  被野狗追', cx, oy + dh * 0.50);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold ' + Math.round(10 * scale) + 'px monospace';
-    ctx.fillText('金币积分 · 体力回能 · 打狗棒击退野狗', cx, oy + dh * 0.58);
-    ctx.fillText('跳过石头躲狗，越往后狗越凶', cx, oy + dh * 0.64);
-    ctx.fillText('左侧屏幕 = 跳跃      右侧屏幕 = 蹬车', cx, oy + dh * 0.70);
-    if (Math.floor(this.time * 2) % 2 === 0) {
-      ctx.fillStyle = '#ffd56b';
-      ctx.font = 'bold ' + Math.round(14 * scale) + 'px monospace';
-      ctx.fillText('点击屏幕开始', cx, oy + dh * 0.80);
-    }
-  };
-
-  // 随里程切换狗的品种：普通黄狗 → 恶犬(黑) → 灰狼
-  PR.Game.prototype._updateDogBreed = function () {
-    var want = this.player.worldX >= cfg.DOG_BREED_WOLF_AT ? 'wolf'
-      : this.player.worldX >= cfg.DOG_BREED_BLACK_AT ? 'black' : 'normal';
-    if (want !== this.dog.breed) {
-      this.dog.breed = want;
-      this.dog.morphFlash = 0.5;
-      this.shake = 0.22;
-      this._sfx('growl');
-      this._spawnFloat('狗进化了！', 72, cfg.GROUND_Y - 32, '#ff4d4d');
-    }
-  };
-
-  // 当前帧狗的追击速度：品种基线 + 里程提速，猛扑 / 眩晕修正
-  PR.Game.prototype._dogSpeed = function () {
-    var base = this.dog.breed === 'wolf' ? cfg.DOG_SPEED_WOLF
-      : this.dog.breed === 'black' ? cfg.DOG_SPEED_BLACK : cfg.DOG_SPEED;
-    var sp = base + this.player.worldX * cfg.DOG_SPEED_RAMP;
-    sp = Math.min(sp, cfg.DOG_SPEED_CAP);
-    if (this.dog.lungeT > 0) sp *= cfg.DOG_LUNGE_SPEED_MULT;
-    if (this.dog.stunT > 0) sp *= cfg.DOG_STUN_SPEED_MULT;
-    return sp;
-  };
-
-  // 处理关卡事件：拾取道具 / 成功跳过石头
-  PR.Game.prototype._handleEvent = function (ev) {
-    if (ev.type === 'clearRock') {
-      this.score += cfg.SCORE_CLEAR_ROCK;
-      this._spawnFloat('+' + cfg.SCORE_CLEAR_ROCK, cfg.PLAYER_SCREEN_X, cfg.GROUND_Y - 34, '#9ad8ff');
-      return;
-    }
-    if (ev.type !== 'pickup') return;
-    if (ev.item === 'coin') {
-      this.score += cfg.SCORE_COIN;
-      this._sfx('coin');
-      this._spawnFloat('+' + cfg.SCORE_COIN, cfg.PLAYER_SCREEN_X + 6, cfg.GROUND_Y - 28, '#ffd56b');
-    } else if (ev.item === 'stamina') {
-      this.player.stamina = Math.min(cfg.STAMINA_MAX, this.player.stamina + cfg.STAMINA_RESTORE);
-      this.score += cfg.SCORE_STAMINA;
-      this._sfx('pickup');
-      this._spawnFloat('+' + cfg.STAMINA_RESTORE + ' 体力', cfg.PLAYER_SCREEN_X + 6, cfg.GROUND_Y - 32, '#5fd35f');
-    } else if (ev.item === 'stick') {
-      this.dog.worldX -= cfg.STICK_KNOCKBACK;
-      this.dog.stunT = cfg.STICK_STUN;
-      this._stickSwingT = 0.25;
-      this.score += cfg.SCORE_STICK;
-      this.shake = 0.18;
-      this._sfx('whoosh');
-      this._sfx('yelp');
-      this._spawnFloat('打狗棒！击退', cfg.PLAYER_SCREEN_X + 12, cfg.GROUND_Y - 34, '#ff9f43');
-    }
-  };
-
-  // 产生一个拾取/加分漂浮字（buffer 坐标系）
-  PR.Game.prototype._spawnFloat = function (text, x, y, color) {
-    this.floatTexts.push({ x: x, y: y, text: text, color: color || '#fff', life: 0, max: 0.9, vy: -0.6 });
-  };
-
-  // 绘制拾取/加分漂浮字（低分辨率 buffer，随世界整数放大）
-  PR.Game.prototype.drawFloatTexts = function (bctx) {
-    for (var i = 0; i < this.floatTexts.length; i++) {
-      var f = this.floatTexts[i];
-      var k = f.life / f.max;
-      var alpha = k < 0.2 ? k / 0.2 : (1 - Math.max(0, (k - 0.5) / 0.5));
-      bctx.save();
-      bctx.globalAlpha = Math.max(0, Math.min(1, alpha));
-      bctx.fillStyle = f.color;
-      bctx.font = 'bold 8px monospace';
-      bctx.textAlign = 'center'; bctx.textBaseline = 'middle';
-      bctx.fillText(f.text, Math.round(f.x), Math.round(f.y));
-      bctx.restore();
-    }
-  };
-
-  // 挥棒动画：骑手前方甩出一根棍子（0.25s）
-  PR.Game.prototype.drawStickSwing = function (bctx) {
-    var p = 1 - this._stickSwingT / 0.25;
-    var cx = cfg.PLAYER_SCREEN_X + 24, cy = cfg.GROUND_Y - 16;
-    var a = -0.9 + 1.7 * p;
-    var len = 16;
-    var x2 = Math.round(cx + Math.cos(a) * len);
-    var y2 = Math.round(cy + Math.sin(a) * len);
-    PR.gfx.line(bctx, cx, cy, x2, y2, '#d9b27a');
-    PR.gfx.line(bctx, cx, cy + 1, x2, y2 + 1, '#a9703a');
-    bctx.save();
-    bctx.globalAlpha = 0.5;
-    PR.gfx.line(bctx, cx, cy - 2, x2, y2 - 2, '#ffffff');
-    bctx.restore();
-  };
-
-  // 产生一声狗吠：音效 + 在狗嘴边冒出一个漂浮的"汪"字
-  PR.Game.prototype._spawnBark = function () {
-    this._sfx(Math.random() < 0.5 ? 'bark' : 'barks');
-    var dogSX = cfg.PLAYER_SCREEN_X - Math.round(this.gap || 0);
-    var pool = ['汪！', '汪！汪！', '汪汪！', '汪！'];
-    var t = pool[(Math.random() * pool.length) | 0];
-    this.barkTexts.push({
-      x: dogSX + 30 + (Math.random() * 10 - 5),
-      y: cfg.GROUND_Y - 16 - (Math.random() * 6),
-      text: t,
-      life: 0, max: 0.75 + Math.random() * 0.25,
-      vy: -0.7 - Math.random() * 0.5,
-      vx: 0.4 - Math.random() * 0.8
-    });
-  };
-
-  // 绘制漂浮的"汪汪汪"（画在低分辨率 buffer 上，随世界一起整数放大）
-  PR.Game.prototype.drawBarkTexts = function (bctx) {
-    for (var i = 0; i < this.barkTexts.length; i++) {
-      var b = this.barkTexts[i];
-      var k = b.life / b.max;
-      var alpha = k < 0.15 ? k / 0.15 : (1 - Math.max(0, (k - 0.55) / 0.45));
-      var sz = 10 + (k < 0.25 ? (k / 0.25) * 5 : 5);
-      bctx.save();
-      bctx.globalAlpha = Math.max(0, Math.min(1, alpha));
-      bctx.fillStyle = '#ff4d4d';
-      bctx.font = 'bold ' + Math.round(sz) + 'px monospace';
-      bctx.textAlign = 'center';
-      bctx.textBaseline = 'middle';
-      bctx.fillText(b.text, Math.round(b.x), Math.round(b.y));
-      bctx.restore();
-    }
-  };
-
-  // 被咬瞬间的死亡画面：血红闪烁 + 满屏爆发的"汪！汪！汪！" + 惨叫
-  PR.Game.prototype.drawDeathIntro = function (ctx, ox, oy, dw, dh, scale) {
-    var t = this._deathT;
-    var cx = ox + dw / 2, cy = oy + dh / 2;
-    var flash = Math.max(0, 1 - t / 0.5);          // 前 0.5s 血红强闪
-    ctx.fillStyle = 'rgba(140,10,15,' + (0.32 + flash * 0.4) + ')';
-    ctx.fillRect(ox, oy, dw, dh);
-
-    var barks = ['汪！', '汪！', '汪！', '汪！汪！', '汪！', '汪！'];
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    for (var i = 0; i < barks.length; i++) {
-      var ang = -Math.PI / 2 + i * (Math.PI * 2 / barks.length);
-      var r = (18 + i * 20) * scale;
-      var tx = cx + Math.cos(ang) * r;
-      var ty = cy + Math.sin(ang) * r * 0.5;
-      var appear = Math.min(1, t * 3 - i * 0.06);
-      var fade = 1 - Math.max(0, (t - 0.6) / 1.0);
-      ctx.globalAlpha = Math.max(0, Math.min(1, appear)) * Math.max(0, fade);
-      ctx.fillStyle = i % 2 ? '#ffd56b' : '#ff4d4d';
-      ctx.font = 'bold ' + Math.round((16 + i * 3) * scale) + 'px monospace';
-      ctx.fillText(barks[i], tx, ty);
-    }
-    ctx.globalAlpha = 1;
-    if (t > 0.35) {
-      ctx.globalAlpha = Math.min(1, (t - 0.35) * 3);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold ' + Math.round(22 * scale) + 'px monospace';
-      ctx.fillText('啊——！', cx, oy + dh * 0.78);
-      ctx.globalAlpha = 1;
-    }
-  };
-
-  PR.Game.prototype.drawGameOver = function (ctx, ox, oy, dw, dh, scale) {
-    if (this._deathT < 1.6) { this.drawDeathIntro(ctx, ox, oy, dw, dh, scale); return; }
-    this.panel(ctx, ox, oy, dw, dh);
-    var ins = this._safeInsets(ox, oy, dw, dh);
-    oy = oy + ins.t; dh = dh - ins.t - ins.b;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    var cx = ox + dw / 2;
-    ctx.fillStyle = '#ff4d4d';
-    ctx.font = 'bold ' + Math.round(24 * scale) + 'px monospace';
-    ctx.fillText('被野狗追上了！', cx, oy + dh * 0.34);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold ' + Math.round(12 * scale) + 'px monospace';
-    ctx.fillText('坚持骑行了 ' + Math.floor(this.player.worldX) + ' 米', cx, oy + dh * 0.46);
-    ctx.fillText('最佳：' + this.bestMeters + ' 米', cx, oy + dh * 0.53);
-    ctx.fillStyle = '#ffd56b';
-    ctx.fillText('本局得分 ' + this.score, cx, oy + dh * 0.61);
-    ctx.fillStyle = '#9ad8ff';
-    ctx.fillText('最佳得分 ' + this.bestScore, cx, oy + dh * 0.67);
-    if (Math.floor(this.time * 2) % 2 === 0) {
-      ctx.fillStyle = '#ffd56b';
-      ctx.font = 'bold ' + Math.round(13 * scale) + 'px monospace';
-      ctx.fillText('点击屏幕重新挑战', cx, oy + dh * 0.72);
-    }
-  };
-
-  PR.Game.prototype.drawWin = function (ctx, ox, oy, dw, dh, scale) {
-    this.panel(ctx, ox, oy, dw, dh);
-    var ins = this._safeInsets(ox, oy, dw, dh);
-    oy = oy + ins.t; dh = dh - ins.t - ins.b;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    var cx = ox + dw / 2;
-    ctx.fillStyle = '#7CFC9A';
-    ctx.font = 'bold ' + Math.round(24 * scale) + 'px monospace';
-    ctx.fillText('到达今日营地！', cx, oy + dh * 0.32);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold ' + Math.round(12 * scale) + 'px monospace';
-    ctx.fillText('成功甩开野狗，完成 Day 1 骑行', cx, oy + dh * 0.44);
-    ctx.fillStyle = '#ffd56b';
-    ctx.fillText('本局得分 ' + this.score, cx, oy + dh * 0.52);
-    ctx.fillStyle = '#9ad8ff';
-    ctx.fillText('最佳得分 ' + this.bestScore, cx, oy + dh * 0.58);
-    ctx.fillStyle = '#9ad8ff';
-    ctx.fillText('DAY 2 · 雪崩  （敬请期待）', cx, oy + dh * 0.66);
-    if (Math.floor(this.time * 2) % 2 === 0) {
-      ctx.fillStyle = '#ffd56b';
-      ctx.font = 'bold ' + Math.round(13 * scale) + 'px monospace';
-      ctx.fillText('点击屏幕再来一次', cx, oy + dh * 0.72);
-    }
+  // 主题烘焙期间的加载画面
+  PR.Game.prototype.drawLoading = function () {
+    var ctx = this.ctx, s = this.s, W = this.vw / s, H = this.vh / s, u = this.job ? this.job.i / this.job.q.length : 0;
+    ctx.setTransform(s, 0, 0, s, this.ox, this.oy);
+    ctx.fillStyle = '#0b1020'; ctx.fillRect(0, 0, W + 1, H + 1);
+    PR.hud.cn(ctx, '像素骑行', W / 2, H * 0.42, 26, 'title', 'center');
+    PR.hud.bar(ctx, W / 2 - 70, H * 0.56, 140, 5, u, '#ffd23f', '#2a3350');
+    PR.hud.cn(ctx, '加载中…', W / 2, H * 0.56 + 24, 12, 'sub', 'center');
   };
 })();

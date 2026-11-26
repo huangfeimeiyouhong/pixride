@@ -14,14 +14,14 @@
   P.reset = function (x) {
     var k;
     this.x = x; this.z = 0; this.vz = 0; this.v = cfg.BASE_SPEED * 0.6;
-    this.onGround = true; this.coyote = 0; this.jumpBuf = 0; this.jumpCut = false;
+    this.onGround = true; this.coyote = 0; this.jumpBuf = 0;
     this.pose = 'ride'; this.tilt = 0; this.tiltV = 0; this.wheel = 0; this.pedalPhase = 0;
     this.stam = this.stamMax(); this.exhaust = 0; this.sprinting = false; this.duck = false;
     this.boostT = 0; this.invuln = 0; this.hurtT = 0; this.slipT = 0; this.squash = 0; this.wobble = 0;
     this.sticks = 0; this.shield = false; this.magnetT = 0; this.throwCd = 0; this.throwWant = false;
-    this.combo = 0; this.comboT = 0; this.bestCombo = 0; this.comboMax = 1;
+    this.combo = 0; this.comboT = 0; this.bestCombo = 0;
     this.dead = false; this.deadT = 0; this.cheerT = 0;
-    this.stats = { coins: 0, stumbles: 0, jumps: 0, dodges: 0, clean: 0, sticks: 0, items: 0, dist: 0 };
+    this.stats = { coins: 0, stumbles: 0, jumps: 0, dodges: 0, clean: 0, sticks: 0, items: 0, dist: 0, bites: 0 };
   };
   P.stamMax = function () { return cfg.STAMINA_MAX * (1 + 0.12 * this.g.upg('stamina')); };
   P.groundY = function () { return this.g.G - this.g.terrain.h(this.x); };
@@ -57,13 +57,12 @@
     }
     if (this.exhaust > 0) { this.exhaust -= dt; if (this.stam > this.stamMax() * 0.35) this.exhaust = 0; }
 
-    // 3) 跳跃：缓冲 + 土狼时间 + 松手截断（短按小跳，最低 330 保证能跳过石头）
+    // 3) 跳跃：缓冲 + 土狼时间（点按 = 完整的一跳，手感稳定，能跳过所有障碍）
     var jp = inp.consumeJump();
     if (jp && live) this.jumpBuf = cfg.JUMP_BUFFER;
     if (this.jumpBuf > 0) this.jumpBuf -= dt;
     if (this.jumpBuf > 0 && this.coyote > 0 && this.hurtT <= 0 && live) this.jump();
     if (!this.onGround) {
-      if (!inp.isJumpHeld() && this.vz > 0 && !this.jumpCut) { this.vz = Math.max(this.vz * cfg.JUMP_CUT, 330); this.jumpCut = true; }
       this.vz -= cfg.GRAVITY * dt;
       this.z += this.vz * dt;
       if (this.z <= 0) this.land();
@@ -75,7 +74,7 @@
     if (this.slipT > 0) this.slipT -= dt;
     if (this.magnetT > 0) this.magnetT -= dt;
     if (this.throwCd > 0) this.throwCd -= dt;
-    if (this.comboT > 0) { this.comboT -= dt; if (this.comboT <= 0) { this.combo = 0; this.comboMax = 1; } }
+    if (this.comboT > 0) { this.comboT -= dt; if (this.comboT <= 0) this.combo = 0; }
     if (this.boostT > 0) {
       this.boostT -= dt;
       if (rnd() < dt * 40) part.add({ x: this.x + rnd.range(-10, 40), y: this.groundY() - 14 - this.z - rnd.range(0, 40), vx: -this.v * 0.5, vy: rnd.range(-10, 10), life: 0.25, col: '#ffe08a', w: 3, h: 1 });
@@ -109,7 +108,7 @@
   P.jump = function () {
     var g = this.g;
     this.vz = cfg.JUMP_V * (1 + 0.06 * g.upg('light'));
-    this.onGround = false; this.coyote = 0; this.jumpBuf = 0; this.jumpCut = false; this.squash = -0.3;
+    this.onGround = false; this.coyote = 0; this.jumpBuf = 0; this.squash = -0.3;
     this.stats.jumps++;
     g.particles.dust(this.x, this.groundY(), 5, 1);
     g.sfx('jump');
@@ -128,7 +127,7 @@
     this.combo++; this.comboT = 3.2;
     if (this.combo > this.bestCombo) this.bestCombo = this.combo;
     this.stats.clean++;
-    g.addScore(5 * mult, ob.x, 60, '+' + (5 * mult) + ' 连击!');
+    g.addScore(5 * mult, ob.x, this.groundY() - 104, '+' + (5 * mult) + ' 连击!');
     g.sfx('tick', this.combo);
   };
   P.comboMult = function () { return clamp(1 + Math.floor((this.combo - 1) / 2), 1, 5); };

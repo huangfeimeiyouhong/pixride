@@ -465,6 +465,7 @@
     S.buildRider();
     S.buildDog();
     S.buildProps();
+    S.misc.pix = null; S.rider.sheet.pix = null;    // 已全部写入画布，释放像素缓冲
   };
 
   // 野狗帧：奔跑 8 相位 × 3 品种，以及 蓄力 / 猛扑 / 咬 / 眩晕 / 坐（与障碍道具共用一张图集）

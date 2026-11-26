@@ -66,9 +66,9 @@
 
   L.ob = function (type, x) { var o = new PR.Obstacle(this.g, type, x, (this.r() * 4) | 0); this.obs.push(o); return o; };
   L.item = function (kind, x, z) { var it = new PR.Item(this.g, kind, x, z); this.items.push(it); return it; };
-  // 金币弧线：span 长度、apex 最高点
+  // 金币弧线：span 长度、apex 最高点（离地 70 以上：必须起跳才吃得到）
   L.arc = function (x0, n, span, apex) {
-    for (var i = 0; i < n; i++) { var u = (i + 0.5) / n; this.item('coin', x0 + (u - 0.5) * span, 28 + Math.sin(u * Math.PI) * apex); }
+    for (var i = 0; i < n; i++) { var u = (i + 0.5) / n; this.item('coin', x0 + (u - 0.5) * span, 70 + Math.sin(u * Math.PI) * apex); }
   };
   L.line = function (x0, n, z, gap) {
     for (var i = 0; i < n; i++) this.item('coin', x0 + i * (gap || 34), z == null ? 38 : z);
@@ -106,7 +106,7 @@
         len = dx;
         break;
       case 'triple':
-        for (i = 0; i < 3; i++) { this.ob(i === 1 ? this.jumpKind() : jk, x + i * 168); this.item('coin', x + i * 168, 74); }
+        for (i = 0; i < 3; i++) { this.ob(i === 1 ? this.jumpKind() : jk, x + i * 168); this.item('coin', x + i * 168, 112); }
         len = 336;
         break;
       case 'branch':
@@ -121,7 +121,7 @@
         break;
       case 'comboTrap':
         this.ob(jk, x); this.ob(fk, x + 150); this.ob(this.jumpKind(), x + 330);
-        this.item('coin', x, 72); this.arc(x + 150, 3, 90, 30); this.item('coin', x + 330, 72);
+        this.item('coin', x, 112); this.arc(x + 150, 3, 90, 30); this.item('coin', x + 330, 112);
         len = 330;
         break;
       case 'hazard':
@@ -130,7 +130,7 @@
         if (r() < 0.5) this.arc(x, 5, 150, 34);
         break;
       case 'driftBank':
-        this.ob('drift', x); this.ob('drift', x + 132); this.item('coin', x, 78); this.item('coin', x + 66, 78); this.item('coin', x + 132, 78);
+        this.ob('drift', x); this.ob('drift', x + 132); this.item('coin', x, 104); this.item('coin', x + 66, 112); this.item('coin', x + 132, 104);
         len = 132;
         break;
       case 'coins':
@@ -146,7 +146,7 @@
       default:
         break;
     }
-    if (d > 0.9 && name !== 'triple' && r() < (d - 0.9) * 0.9) this.ob(this.flatKind(), x + len + 210), len += 210;
+    if (d > 0.9 && name !== 'triple' && r() < (d - 0.9) * 0.9) { this.ob(this.flatKind(), x + len + 210); len += 210; }
     var gap = 540 - 210 * Math.min(d, 1.2) - 110 * Math.max(0, d - 1.2);
     return len + gap * r.range(0.86, 1.14);
   };
@@ -161,10 +161,10 @@
     for (i = this.sticks.length - 1; i >= 0; i--) if (this.sticks[i].dead) this.sticks.splice(i, 1);
   };
 
-  // 低头判定：前方 / 头顶有低垂树枝
+  // 低头判定：前方 / 头顶有低垂树枝（范围与碰撞盒一致）
   L.needDuck = function (px) {
     var o = this.obs, i;
-    for (i = 0; i < o.length; i++) if (o[i].def.low && !o[i].broken && px > o[i].x - 112 && px < o[i].x + 24) return true;
+    for (i = 0; i < o.length; i++) if (o[i].def.low && !o[i].broken && px > o[i].x - 108 && px < o[i].x + 64) return true;
     return false;
   };
 
@@ -174,18 +174,18 @@
     for (i = 0; i < this.obs.length; i++) this.obs[i].update(dt);
     for (i = 0; i < this.items.length; i++) this.items[i].update(dt, p);
 
-    // ---- 障碍碰撞 ----
+    // ---- 障碍碰撞 ----（碰撞盒比精灵略小：后轮前缘到前轮轴心，障碍半宽内缩 3，手感更宽容）
     if (!this.finished && !p.dead && g.state === 'PLAY') {
-      var px0 = p.x - 12, px1 = p.x + 58;
+      var px0 = p.x - 6, px1 = p.x + 48, m = 3;
       for (i = 0; i < this.obs.length; i++) {
         ob = this.obs[i];
-        if (ob.hit || ob.broken) continue;
-        var inX = px1 > ob.x - ob.def.hw && px0 < ob.x + ob.def.hw;
-        if (!ob.passed && ob.x + ob.def.hw + 6 < p.x) {
+        if (ob.broken) continue;
+        var inX = px1 > ob.x - ob.def.hw + m && px0 < ob.x + ob.def.hw - m;
+        if (!ob.passed && ob.x + ob.def.hw + 4 < p.x) {
           ob.passed = true;
-          if ((ob.def.solid || ob.def.low) && inX === false) p.cleanPass(ob);
+          if ((ob.def.solid || ob.def.low) && !ob.hit) p.cleanPass(ob);
         }
-        if (!inX) continue;
+        if (ob.hit || !inX) continue;
         var hit = false;
         if (ob.def.solid) hit = p.z < ob.def.h + 2;
         else if (ob.def.low) hit = p.z > 12;
@@ -261,7 +261,7 @@
   // 到站时的营地装饰（画在路面之后、角色之前）
   L.drawCamp = function (ctx, camX, shy) {
     if (this.mode !== 'journey') return;
-    var g = this.g, p = PR.sprites.props, th = PR.art.buildStatic();
+    var g = this.g, th = PR.art.buildStatic(), k;
     var x = this.endX + 40 - camX, gy = Math.round(g.G - g.terrain.h(this.endX + 40)) + shy;
     if (x > -260 && x < g.bw + 120) {
       draw(ctx, th.tent[0], x + 30, gy - 14);
@@ -272,7 +272,6 @@
       for (k = 0; k < 8; k++) if (k % 2 === 0) ctx.fillRect(x - 3 + k * 12, gy - 92, 12, 7);
       ctx.fillStyle = PR.colors.ink; ctx.fillRect(x - 3, gy - 85, 96, 1);
     }
-    var k;
   };
 
   PR.Level = Level;

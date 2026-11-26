@@ -175,12 +175,12 @@
   }
 
   function paintRidge(v, W, H, o) {
-    var hh = makeProfile(o.kind, W, o.amp, o.seed, o.sharp);
+    var hh = o.hh || makeProfile(o.kind, W, o.amp, o.seed, o.sharp);
     var lit = hex(o.lit), sh = hex(o.shade), haze = hex(o.hazeC), mid = mix(sh, lit, 0.5);
     var snow = o.snow ? hex(o.snow) : 0, snowS = o.snowShade ? hex(o.snowShade) : 0, snowM = snow ? mix(snowS, snow, 0.5) : 0;
     var sl = o.amp * (o.snowLine || 0), facet = o.facet || 0;
     var sunSide = o.sunSide, base = o.base, x, y;
-    for (x = 0; x < W; x++) {
+    for (x = o.x0 || 0; x < (o.x1 || W); x++) {            // x0 / x1：分片烘焙
       // 用 ±5px 的坡向定明暗（避免逐列细条纹），用局部凹陷 / 凸起画沟壑和棱线
       var slope = hh[(x + 5) % W] - hh[(x - 5 + W) % W];
       var curve = hh[(x + 3) % W] + hh[(x - 3 + W) % W] - 2 * hh[x];
@@ -452,12 +452,20 @@
     v.px(-8, -134, hex('#dfe6ee')); v.px(7, -134, hex('#dfe6ee')); v.px(-6, -119, hex('#dfe6ee')); v.px(5, -119, hex('#dfe6ee'));
   }
   function pMani(v, seed) {
-    var r = rng(seed), C = [hex('#f0f0f0'), hex('#3a5aa8'), hex('#c9403a'), hex('#3a9a5a'), hex('#e0c040')], i;
-    for (i = 0; i < 7; i++) {
-      var x = -18 + i * 6 + r.int(-1, 1), y = -r.int(6, 16), w = r.int(7, 11), h = r.int(4, 7);
-      v.rect(x, y, w, h, OUT0); v.rect(x + 1, y + 1, w - 2, h - 2, C[i % 5]);
+    var r = rng(seed), OUT = hex('#2a2420');
+    var ST = [hex('#9aa0a8'), hex('#b8bcc2'), hex('#8a9098'), hex('#c8b8a0'), hex('#a8a49c')], C = [hex('#d94a3a'), hex('#3a62c8'), hex('#3aa85a'), hex('#e8c040'), hex('#f0f0f0')];
+    // 玛尼堆：下宽上窄的石堆，每块石头有受光面 / 背光面，正面有一点彩绘刻痕
+    var rows = [[3, -6, 13, 7], [2, -12, 12, 7], [2, -17, 10, 6], [1, -25, 9, 9]], i, j, q;
+    for (i = 0; i < rows.length; i++) {
+      var n = rows[i][0], y = rows[i][1], w = rows[i][2], h = rows[i][3], span = n * (w + 1);
+      for (j = 0; j < n; j++) {
+        var x = Math.round(-span / 2 + j * (w + 1) + r.range(-1, 1)), c = ST[r.int(0, ST.length - 1)], k = r.int(1, 2), cc = C[r.int(0, C.length - 1)];
+        v.rect(x, y, w, h, OUT);
+        v.rect(x + 1, y + 1, w - 2, h - 2, c);
+        v.hline(x + 1, x + w - 2, y + 1, shade(c, 1.18)); v.hline(x + 1, x + w - 2, y + h - 2, shade(c, 0.78));
+        for (q = 0; q < k; q++) v.hline(x + 2 + q * 4, x + 3 + q * 4, y + 3 + (i & 1), cc);
+      }
     }
-    v.rect(-10, -24, 9, 7, OUT0); v.rect(-9, -23, 7, 5, C[0]);
   }
   function pFence(v) {
     var OUT = hex('#241808'), A = hex('#8a6a42'), B = hex('#6a4a2a'), i;
@@ -591,31 +599,62 @@
         list.push(sheet.add(d.w, d.h, (function (p, s) { return function (v, w, h) { p(v.sub(w >> 1, h), s); }; })(d.paint, 11 + i * 13 + k * 7), { ax: d.w >> 1, ay: d.h - 1 }));
       }
     }
+    sheet.pix = null;                           // 已全部写入画布，释放像素缓冲
     return things;
   };
 
   // ---------------- 主题烘焙 ----------------
-  var FAR_H = 300, MID_H = 150, NEAR_H = 96, CLOUD_H = 54;
+  // 先占位（同步、几毫秒），再由 Job.step() 分片烘焙：每片约 128 列，避免一帧卡顿
+  var FAR_H = 300, MID_H = 150, NEAR_H = 96, CLOUD_H = 54, CLOUD_W = [150, 190, 120, 220, 165];
   A.FAR_H = FAR_H; A.MID_H = MID_H; A.NEAR_H = NEAR_H;
-  A.build = function (ti) {
-    var def = T[ti], sunSide = def.sun.x > 0.5 ? 1 : -1;
+  function ridgeOpts(o, def, sunSide, ti, H, base) {
+    return { kind: o.kind, amp: o.amp, lit: o.lit, shade: o.shade, snow: o.snow, snowShade: o.snowShade, snowLine: o.snowLine,
+      haze: o.haze, hazeC: def.haze.c, facet: o.facet, sunSide: sunSide, base: base, seed: ti * 31 + H, sharp: o.sharp };
+  }
+  A.create = function (ti) {
+    var def = T[ti], sunSide = def.sun.x > 0.5 ? 1 : -1, i;
     var sheet = new gfx.Sheet(1024, 1024), art = { def: def, sheet: sheet, sunSide: sunSide };
-    var mk = function (o, H, base) {
-      return sheet.add(TW, H, function (v) {
-        paintRidge(v, TW, H, { kind: o.kind, amp: o.amp, lit: o.lit, shade: o.shade, snow: o.snow, snowShade: o.snowShade, snowLine: o.snowLine,
-          haze: o.haze, hazeC: def.haze.c, facet: o.facet, sunSide: sunSide, base: base, seed: ti * 31 + H, sharp: o.sharp });
-      }, { pad: 0 });
-    };
-    art.far = mk(def.far, FAR_H, 274); art.far.base = 274;
-    art.mid = mk(def.mid, MID_H, 96); art.mid.base = 96;
-    art.near = mk(def.near, NEAR_H, 40); art.near.base = 40;
+    art.far = sheet.reserve(TW, FAR_H, { pad: 0 }); art.far.base = 274; art.far.opt = ridgeOpts(def.far, def, sunSide, ti, FAR_H, 274);
+    art.mid = sheet.reserve(TW, MID_H, { pad: 0 }); art.mid.base = 96; art.mid.opt = ridgeOpts(def.mid, def, sunSide, ti, MID_H, 96);
+    art.near = sheet.reserve(TW, NEAR_H, { pad: 0 }); art.near.base = 40; art.near.opt = ridgeOpts(def.near, def, sunSide, ti, NEAR_H, 40);
     art.clouds = [];
-    var cw = [150, 190, 120, 220, 165];
-    for (var i = 0; i < cw.length; i++) {
-      art.clouds.push(sheet.add(cw[i], CLOUD_H, (function (w, s) { return function (v) { paintCloud(v.sub(w >> 1, CLOUD_H), w, CLOUD_H, s, hex(def.cloud.top), hex(def.cloud.bot), sunSide); }; })(cw[i], i * 17 + ti * 5), { pad: 1 }));
-    }
-    var sun = def.sun, R = Math.round(sun.r * 5.5) + 1;
-    art.sun = sheet.add(R * 2 + 2, R * 2 + 2, function (v) { paintSun(v.sub(R + 1, R + 1), sun); }, { ax: R + 1, ay: R + 1 });
+    for (i = 0; i < CLOUD_W.length; i++) art.clouds.push(sheet.reserve(CLOUD_W[i], CLOUD_H, { pad: 1 }));
+    var R = Math.round(def.sun.r * 5.5) + 1;
+    art.sun = sheet.reserve(R * 2 + 2, R * 2 + 2, { ax: R + 1, ay: R + 1 });
     return art;
   };
+  // 分步烘焙任务：step() 每次做一小片，返回 true 表示全部完成
+  function Job(ti) {
+    this.ti = ti; this.art = A.create(ti); this.q = []; this.i = 0;
+    var art = this.art, tiles = [art.far, art.mid, art.near], slice = [24, 48, 96], x, i, o;
+    for (i = 0; i < 3; i++) {                    // 山脊高度曲线每片瓦片只算一次（切片很细，避免重复计算）
+      o = tiles[i].opt; o.hh = makeProfile(o.kind, TW, o.amp, o.seed, o.sharp);
+      for (x = 0; x < TW; x += slice[i]) this.q.push({ sp: tiles[i], x0: x, x1: Math.min(TW, x + slice[i]) });
+    }
+    for (i = 0; i < art.clouds.length; i++) {
+      this.q.push({ sp: art.clouds[i], paint: (function (w, s, sp) { return function () {
+        paintCloud(new gfx.View(art.sheet.pix, sp.sx, sp.sy).sub(w >> 1, CLOUD_H), w, CLOUD_H, s, hex(art.def.cloud.top), hex(art.def.cloud.bot), art.sunSide);
+      }; })(CLOUD_W[i], i * 17 + ti * 5, art.clouds[i]) });
+    }
+    var R2 = Math.round(art.def.sun.r * 5.5) + 1;
+    this.q.push({ sp: art.sun, paint: function () { paintSun(new gfx.View(art.sheet.pix, art.sun.sx, art.sun.sy).sub(R2, R2), art.def.sun); } });
+  }
+  A.Job = Job;
+  Job.prototype.step = function () {
+    if (this.i >= this.q.length) return true;
+    var job = this.q[this.i++], art = this.art, sheet = art.sheet, sp = job.sp, o = {}, k, v;
+    sheet.pix.clip = sp._c.slice(0);
+    if (job.paint) job.paint();
+    else {
+      for (k in sp.opt) o[k] = sp.opt[k];
+      o.x0 = job.x0; o.x1 = job.x1;
+      v = new gfx.View(sheet.pix, sp.sx, sp.sy);
+      paintRidge(v, TW, sp.h, o);
+    }
+    sheet.pix.clip = null;
+    if (job.paint || job.x1 >= TW) sheet.flush(sp);
+    return this.i >= this.q.length;
+  };
+  // 一次性完整烘焙（工具 / 调试用）
+  A.build = function (ti) { var j = new Job(ti); while (!j.step()) {} return j.art; };
 })();

@@ -39,6 +39,19 @@
     }
   };
 
+  // 背景 + 路面（角色之前）
+  Scene.prototype.drawBack = function (ctx, camX, shy, extras) {
+    var g = this.g;
+    this.drawSky(ctx, camX, g.bw, g.bh, g.G, shy, g.time);
+    this.drawProps(ctx, camX, g.bw, g.G, 0, shy, g.time, extras);
+    this.drawGround(ctx, camX, g.bw, g.bh, g.G, 0, shy);
+  };
+  // 前景草丛（角色之后）
+  Scene.prototype.drawFrontAll = function (ctx, camX, shx) {
+    this.drawFront(ctx, camX, this.g.bw, this.g.bh, shx, this.def.front);
+  };
+  Scene.prototype.draw = function (ctx, camX, shy) { this.drawBack(ctx, camX, shy, null); };
+
   // 竖向构图（相对路面基准线 G）：远山脚 → 湖面 → 对岸（中景）→ 近处树线 → 草带 → 路面 → 近路肩
   var L = { FAR: 46, LAKE_TOP: 96, LAKE_BOT: 50, RIVER_TOP: 84, RIVER_BOT: 44, MID: 16, NEAR: 2, SHOULDER: 64, SKY: 40 };
 
@@ -240,6 +253,7 @@
 
   // 路面：整块填充（带抗锯齿的斜边）之后，用逐段 1px 对齐的矩形把可见边缘重新描清楚
   Scene.prototype.drawGround = function (ctx, camX, W, H, G, shx, shy, step) {
+    step = step || 6;                                            // 每隔多少像素采样一次路面高度
     var terr = this.g.terrain, def = this.def, road = def.road, g1 = def.grass[0], g2 = def.grass[1];
     var n = Math.ceil(W / step) + 1, ys = this.ys, i;
     if (ys.length < n + 1) ys.length = n + 1;

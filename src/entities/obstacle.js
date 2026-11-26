@@ -10,7 +10,7 @@
 
   var DEF = PR.OBDEF = {
     rock:    { hw: 12, h: 16, solid: true },
-    log:     { hw: 25, h: 18, solid: true },
+    log:     { hw: 20, h: 18, solid: true },
     branch:  { hw: 60, low: true },
     pothole: { hw: 15, flat: true },
     puddle:  { hw: 20, flat: true },

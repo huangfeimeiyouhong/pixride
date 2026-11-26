@@ -130,14 +130,22 @@
     }
   };
 
-  // 飘字 + 横幅（文本由 hud 绘制）
+  // 飘字 + 横幅。纯 ASCII 的飘字用像素字；含中文的用系统字体（描边），在主画布上绘制所以是清晰的
+  var FLOAT_C = { gold: '#ffd23f', bad: '#ff8f86', good: '#9cf58f', shield: '#8fe8ff', dim: '#cfe0f5', white: '#ffffff' };
+  var NOT_ASCII = /[^\x20-\x7e]/;
   F.drawTexts = function (ctx, camX, hud, W) {
-    var i, x;
+    var i, x, sx, u, a, k;
     for (i = 0; i < this.texts.length; i++) {
       x = this.texts[i];
-      var u = x.t / x.life, a = u > 0.65 ? (1 - u) / 0.35 : 1;
-      var k = x.t < 0.12 ? gfx.easeOutBack(x.t / 0.12) : 1;
-      hud.text(ctx, x.str, x.x - camX + x.drift * u, x.y, { kind: x.kind, size: x.big, align: 'center', alpha: a, scale: k });
+      u = x.t / x.life; a = u > 0.65 ? (1 - u) / 0.35 : 1;
+      k = x.t < 0.12 ? gfx.easeOutBack(x.t / 0.12) : 1;
+      sx = x.x - camX + x.drift * u;
+      if (sx < -200 || sx > W + 200) continue;
+      if (NOT_ASCII.test(x.str)) {
+        ctx.save(); ctx.translate(Math.round(sx), Math.round(x.y)); ctx.scale(k, k);
+        hud.cn(ctx, x.str, 0, 0, x.big ? 15 : 11, FLOAT_C[x.kind] || x.kind || 'white', 'center', a);
+        ctx.restore();
+      } else hud.text(ctx, x.str, sx, x.y, { kind: x.kind, size: x.big ? 2 : 1, align: 'center', alpha: a });
     }
     if (this.banner) {
       var b = this.banner, ub = b.t < 0.25 ? gfx.easeOutCubic(b.t / 0.25) : (b.t > b.life - 0.35 ? Math.max(0, (b.life - b.t) / 0.35) : 1);
